@@ -1,0 +1,329 @@
+// SPDX-License-Identifier: MIT
+// -----------------------------------------------------------------------------
+//  machine.h  --  仮想 PC-9801 本体
+//
+//  「エミュレータを丸ごと作る」のではなく、PC-98 のゲームが触る部分だけを
+//  ハードウェア（GDC/GRCG/EGC/パレット/8253/8259/キーボード/マウス/OPNA）と
+//  HLE（BIOS INT 18h 等、MS-DOS INT 21h）で用意する。ROM は一切要らない。
+//  GMPV3 Studio の「必要なデバイスの振る舞いと DOS ファンクションだけを
+//  自前で実装する」考え方を、画面と入力まで広げたもの。
+// -----------------------------------------------------------------------------
+#pragma once
+#include <stdint.h>
+#include <stddef.h>
+#include <vector>
+#include <string>
+#include "cpu.h"
+#include "memio.h"
+
+// ---- 時間軸 ------------------------------------------------------------------
+// 基準クロック = OPNA クロック = 7.9872MHz。8253 はその 1/4（1.9968MHz）。
+#define MASTER_CLOCK     7987200u
+#define LINE_TICKS       322           // 24.8kHz 水平周期（≒ 7987200/24830）
+#define FRAME_LINES      440
+#define DISPLAY_LINES    400
+#define FRAME_TICKS      (LINE_TICKS * FRAME_LINES)   // ≒ 56.4Hz
+
+struct Pic {
+    uint8_t imr, irr, isr, base;
+    uint8_t icw_step, icw4_needed, read_isr, aeoi;
+};
+
+struct Pit {
+    uint16_t reload, counter, latch;
+    uint8_t  mode, access, wr_hi, rd_hi, latched, armed;
+    uint8_t  status_latched, status;
+};
+
+struct Gdc {
+    uint8_t  cmd;              // 実行中のコマンド
+    int      pcount;           // 受け取ったパラメータ数
+    uint8_t  params[16];
+    uint8_t  pram[16];
+    int      pram_ptr;
+    uint8_t  display;          // START/STOP
+    uint8_t  zoom;             // ZOOM の表示倍率（下位 4bit が倍率-1）
+    uint8_t  csrform[3];
+    uint8_t  sync[8];
+    uint8_t  pitch;
+    uint32_t ead;              // CSRW で設定したアドレス
+    uint8_t  dad;
+    // 描画コマンド（VECTW/VECTE/WRITE）用
+    uint8_t  vect[11];
+    uint8_t  mode_write;       // WRITE の種類（REPLACE/COMPLEMENT/CLEAR/SET）
+    uint16_t pattern;          // TEXTW で設定したパターン
+    std::vector<uint8_t> fifo; // 読み出し用
+};
+
+struct Egc {
+    uint16_t access, fgbg, ope, fg, mask, bg, sft, leng;
+    uint16_t lastvram[4];
+    uint16_t patreg[4];
+    uint16_t fgc[4], bgc[4];
+    int      func;
+    uint32_t remain;
+    uint32_t stack;
+    uint8_t  buf[4096 / 8 + 4 * 4];
+    uint8_t* inptr[4];
+    uint8_t* outptr[4];
+    uint16_t mask2;
+    uint16_t srcmask;
+    uint8_t  srcbit, dstbit, sft8bitl, sft8bitr;
+    uint32_t inptr_off, outptr_off;
+    uint8_t  vram_src[4][2], vram_data[4][2];
+};
+
+struct Opna {
+    uint8_t  addr[2];
+    uint8_t  reg[2][256];
+    uint8_t  status;
+    uint8_t  irq_enable_a, irq_enable_b, timer_a_run, timer_b_run;
+    uint8_t  prescale;
+    int32_t  timer_a_period, timer_a_count;
+    int32_t  timer_b_period, timer_b_count;
+    uint8_t  keyon[8];          // 28h で最後に書いたスロットの組（ch 0-2, 4-6）。ロード時の鳴らし直し用
+};
+
+struct RegWrite { uint64_t tick; uint8_t part, addr, val; };
+
+// PC-9801-86 の PCM（pcm86.cpp）
+struct Pcm86 {
+    uint8_t  ctrl;          // A468h（bit4 の割込みフラグは irqflag に分けて持つ）
+    uint8_t  dactrl;        // A46Ah（ctrl bit5=0 のとき）
+    uint8_t  vol;           // A466h の音量（0..15）
+    uint8_t  irqflag;
+    uint16_t thresh;        // 割込みを起こす FIFO 残量
+    uint16_t rpos, wpos;
+    int32_t  count;
+    uint64_t acc;
+    uint8_t  fifo[0x8000];
+};
+struct PcmSample { uint64_t tick; int16_t l, r; };
+
+// MPU-PC98II（MPU-401 互換）。UART モードと、インテリジェントモードのうち
+// 「MIDI データの直接送信（D0h-DFh）」とバージョン問い合わせだけを扱う
+struct Mpu {
+    uint8_t  uart;
+    uint8_t  recv[16];
+    uint8_t  rcnt, rpos;
+    uint8_t  pending_cmd;           // D0h-DFh の直後
+    uint8_t  last;                  // 最後に読ませた値
+};
+
+struct Config {
+    std::string root;            // ゲームのフォルダ（ホストのパス）
+    std::string start;           // 最初に実行するもの
+    std::string args;
+    char     drive = 'A';
+    int      cpu_mhz = 16;
+    int      sound_irq = 12;     // 既定は PC-9801-86 の INT5
+    int      sound_board = 86;   // 86 / 26 / 0
+    bool     fm_enable = true;
+    int      memory_kb = 640;
+    bool     emulate_mouse = true;
+    int      key_repeat = 1;
+    int      trace = 0;
+    int      dos_version = 0x0500;   // 5.00（上位=メジャー）
+    int      midi = 0;               // PC-9801-86 の PCM（pcm86.cpp）
+struct Pcm86 {
+    uint8_t  ctrl;          // A468h（bit4 の割込みフラグは irqflag に分けて持つ）
+    uint8_t  dactrl;        // A46Ah（ctrl bit5=0 のとき）
+    uint8_t  vol;           // A466h の音量（0..15）
+    uint8_t  irqflag;
+    uint16_t thresh;        // 割込みを起こす FIFO 残量
+    uint16_t rpos, wpos;
+    int32_t  count;
+    uint64_t acc;
+    uint8_t  fifo[0x8000];
+};
+struct PcmSample { uint64_t tick; int16_t l, r; };
+
+// MPU-PC98II（E0D0h）を載せる。0 = 無し
+    int      midi_irq = 6;           // INT2
+    bool     ems = true;             // EMM386 相当（LIM EMS 4.0、ページフレーム D000h）
+    int      ems_kb = 4096;
+    int      xms_kb = 8192;          // HIMEM.SYS 相当（XMS 3.0）。0 で無し
+};
+
+// マウスの状態（バスマウス）
+struct Mouse {
+    int      acc_x, acc_y;       // 前回ラッチから溜まった移動量
+    int8_t   lat_x, lat_y;
+    uint8_t  buttons;            // bit0=左 bit1=右（1=押下）
+    uint8_t  portc;              // 7FDDh の値
+    uint8_t  freq;               // BFDBh
+    int32_t  timer;
+    // INT 33h 側
+    int      x, y, minx, maxx, miny, maxy;
+    int      mickey_x, mickey_y;
+    int      hle_dx, hle_dy;
+    int      press_cnt[2], release_cnt[2];
+    int      press_x[2], press_y[2], release_x[2], release_y[2];
+    int      visible;
+};
+
+struct Machine {
+    Cpu      cpu;
+    uint8_t* ram;               // PC98_RAM_SIZE
+    uint8_t  tvram[0x4000];
+    uint8_t  gvram[2][4][0x8000];
+
+    Pic      pic[2];
+    Pit      pit[3];
+    int32_t  pit_frac;
+    Gdc      gdcm, gdcs;
+    Egc      egc;
+    Opna     opna;
+    Mpu      mpu;
+    Pcm86    pcm86;
+    std::vector<PcmSample> pcm_out;  // PCM86 の出力（フレームごとに Player が取り出す）
+    std::vector<uint8_t> midi_out;   // ホストへ送る MIDI バイト列（フレームごとに取り出す）
+    Mouse    mouse;
+    Config   cfg;
+
+    // 画面
+    uint8_t  analog;            // 16 色モード
+    uint8_t  pal[16][3];        // G,R,B（4bit）
+    uint8_t  palidx;
+    uint8_t  degpal[4];
+    uint8_t  disp_bank, draw_bank;
+    uint8_t  modeff[8];         // 68h
+    uint8_t  modeff2[8];        // 6Ah の各 bit
+    uint8_t  gfx_200;           // 200 ライン表示
+    uint8_t  gfx_200_lower;     // 200 ラインで下半分を表示
+    uint8_t  gfx_color;         // カラー / モノクロ
+    uint8_t  border;
+    uint8_t  egc_enabled;
+
+    // GRCG
+    uint8_t  grcg_mode, grcg_tile[4], grcg_idx;
+
+    // CG ROM
+    uint16_t cg_code;
+    uint8_t  cg_line, cg_left;
+
+    // キーボード（8251）
+    std::vector<uint8_t> kb_queue;
+    uint8_t  kb_data, kb_ready;
+    int32_t  kb_delay;
+    uint8_t  kb_down[128];
+
+    // システムポート
+    uint8_t  portc;              // 35h（8255 ポート C）
+    uint8_t  beep_on;
+    uint8_t  a20;
+
+    // 時間
+    uint64_t ticks;              // 基準クロックでの通算
+    uint32_t frame_pos;          // フレーム内位置（基準クロック）
+    uint64_t frame_count;
+    uint8_t  vsync_armed;
+    uint32_t cpu_hz;
+    uint64_t cyc_acc;
+
+    // 音
+    std::vector<RegWrite> regw;  // レンダラへ渡す書き込み
+    uint64_t audio_tick;         // ここまで音を作った
+    std::vector<std::pair<uint64_t,int>> beepw;   // ビープの変化
+
+    // 状態
+    int      quit;               // ゲームが終わった（シェルが最後まで行った）
+    std::string status;
+    unsigned unknown_io;
+};
+
+extern Machine* g_m;
+
+// machine.cpp
+Machine* machine_create(const Config& cfg);
+void     machine_destroy(Machine* m);
+void     machine_run_frame(Machine* m);          // 1 フレームぶん進める
+void     machine_raise_irq(Machine* m, int irq);
+void     machine_eoi(Machine* m, int irq);
+void     machine_key(Machine* m, uint8_t scancode, bool down);
+void     machine_mouse(Machine* m, int dx, int dy, int buttons);
+void     pic_update_hint(Machine* m);
+void     opna_write(Machine* m, int part, uint8_t addr, uint8_t val);
+int      pit0_hz_ok(Machine* m);
+
+// video.cpp
+struct FontSource {
+    // JIS 区点コード（0x2121..0x7E7E）の 16x16 を 32 バイトで返す（行ごと 左, 右）
+    void (*kanji)(void* user, uint16_t jis, uint8_t out[32]);
+    // ANK（0x00..0xFF）の 8x16 を 16 バイトで返す
+    void (*ank)(void* user, uint8_t code, uint8_t out[16]);
+    // 全角の字（JIS）を 8x16 に縦長で描く（任意。無ければ全角を横に畳んで作る）
+    void (*narrow)(void* user, uint16_t jis, uint8_t out[16]);
+    void* user;
+};
+void video_set_font(const FontSource& fs);
+void video_render(Machine* m, uint32_t* out /* 640x400 ARGB */);
+const uint8_t* font_get_kanji(uint16_t jis);   // 32 バイト
+const uint8_t* font_get_ank(uint8_t c);        // 16 バイト
+uint16_t sjis_to_jis(uint16_t sj);
+// fontrom.cpp（擬似漢字 ROM）
+void fontrom_set_jis78(bool on);
+bool fontrom_is_gaiji(uint16_t jis);
+void fontrom_gaiji_write(uint16_t jis, int line, bool left, uint8_t v);
+void fontrom_reset_gaiji();
+void fontrom_make_sheet(std::vector<uint32_t>& px, int* w, int* h);
+
+// bios.cpp
+void bios_init(Machine* m);
+void bios_hle(Machine* m, uint8_t n);
+void bios_key_irq(Machine* m);
+void console_putc(Machine* m, uint8_t c);
+void console_reset(Machine* m);
+int  bios_key_available(Machine* m);
+uint16_t bios_key_read(Machine* m, bool remove);
+
+// pcm86.cpp
+void    pcm86_advance(Machine* m, uint32_t t);
+uint8_t pcm86_in(Machine* m, uint16_t port);
+void    pcm86_out(Machine* m, uint16_t port, uint8_t v);
+void    pcm86_reset(Machine* m);
+
+// xmsems.cpp
+void xmsems_init(Machine* m);
+void xmsems_hle(Machine* m, uint8_t n);
+bool xms_int2f(Machine* m);
+bool ems_enabled(Machine* m);
+
+// dos.cpp
+void dos_init(Machine* m);
+void dos_hle(Machine* m, uint8_t n);
+void shell_start(Machine* m, const std::string& cmdline);
+
+// 共通
+void set_cf(Machine* m, bool on);
+void set_zf(Machine* m, bool on);
+void plog(const char* fmt, ...);
+
+// HLE トラップ番号の割り振り
+enum {
+    HLE_INT_BASE   = 0x00,   // 0x00-0x7F: 対応する INT をそのまま（HLE_INT_BASE+vec）ではなく個別に下の表で
+    HLE_INT18      = 0x18,
+    HLE_INT1C      = 0x1C,
+    HLE_INT1A      = 0x1A,
+    HLE_INT1B      = 0x1B,
+    HLE_INT1F      = 0x1F,
+    HLE_INT09      = 0x09,
+    HLE_INT06      = 0x06,
+    HLE_IRQ_EOI_M  = 0x0A,   // マスタ EOI して戻る
+    HLE_IRQ_EOI_S  = 0x10,   // スレーブ EOI して戻る
+    HLE_INT20      = 0x20,
+    HLE_INT21      = 0x21,
+    HLE_INT25      = 0x25,
+    HLE_INT26      = 0x26,
+    HLE_INT27      = 0x27,
+    HLE_INT28      = 0x28,
+    HLE_INT29      = 0x29,
+    HLE_INT2F      = 0x2F,
+    HLE_INT33      = 0x33,
+    HLE_INTDC      = 0xDC,
+    HLE_INT67      = 0x67,
+    HLE_XMS        = 0xE0,
+    HLE_SHELL      = 0xFD,   // シェル（バッチ）の次の行へ
+    HLE_EXIT       = 0xFE,
+    HLE_NOP        = 0xFF,
+};

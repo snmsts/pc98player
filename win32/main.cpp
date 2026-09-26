@@ -1,0 +1,868 @@
+// SPDX-License-Identifier: MIT
+// -----------------------------------------------------------------------------
+//  PC98PLAYER.EXE  --  PC-98 のゲームを「Windows アプリのように」動かす窓
+//
+//  ゲームのフォルダにこの EXE と PC98PLAYER.INI を置いて実行するだけ。
+//  ・画面      : 640x400 を整数倍（Scale=）で表示。Alt+Enter で全画面
+//  ・キー      : 物理位置で PC-98 のキーへ（JIS 配列基準）
+//  ・マウス    : ウインドウをクリックすると捕まえる（F12 で放す）
+//  ・音        : YM2608（ymfm）＋ビープを waveOut で出す
+//  ・フォント  : PC-98 の漢字 ROM の代わりに MS ゴシックをその場で描く
+// -----------------------------------------------------------------------------
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <mmsystem.h>
+#include <shellapi.h>
+#include <stdio.h>
+#include <string>
+#include <vector>
+#include <deque>
+#include "../core/player.h"
+#include "../core/hostfs.h"
+
+
+static Player*       g_p = nullptr;
+static HWND          g_hwnd;
+static BITMAPINFO    g_bmi;
+static bool          g_full = false;
+static WINDOWPLACEMENT g_wp = { sizeof(g_wp) };
+static bool          g_captured = false;
+static int           g_mouse_dx = 0, g_mouse_dy = 0, g_mouse_btn = 0;
+static int           g_mouse_speed = 100;
+static bool          g_turbo = false;
+static std::wstring  g_title;
+static bool          g_paused_by_focus = false;
+static bool          g_pause_inactive = false;
+
+static std::wstring W(const std::string& utf8) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    std::wstring w(n ? n - 1 : 0, L'\0');
+    if (n) MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &w[0], n);
+    return w;
+}
+static std::string U(const std::wstring& w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string s(n ? n - 1 : 0, '\0');
+    if (n) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+// ---- フォント（GDI で描く）----------------------------------------------------
+struct GdiFont {
+    HDC dc = nullptr;
+    HBITMAP bmp = nullptr;
+    HFONT font16 = nullptr, font8 = nullptr;   // font8: 幅 8 ドットに縦長で描く MS ゴシック
+    uint32_t* bits = nullptr;
+};
+static GdiFont g_font;
+
+static void font_init(const std::wstring& face) {
+    g_font.dc = CreateCompatibleDC(nullptr);
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = 16; bi.bmiHeader.biHeight = -16;
+    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+    g_font.bmp = CreateDIBSection(g_font.dc, &bi, DIB_RGB_COLORS, (void**)&g_font.bits, nullptr, 0);
+    SelectObject(g_font.dc, g_font.bmp);
+    std::wstring f = face.empty() ? L"ＭＳ ゴシック" : face;
+    g_font.font16 = CreateFontW(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, SHIFTJIS_CHARSET, OUT_DEFAULT_PRECIS,
+                                CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, f.c_str());
+    // 半角化用: 同じフォントを幅 8 ドットに押し込んで描く（PC-98 の「年月日」やヰヱなど）
+    g_font.font8 = CreateFontW(-16, 8, 0, 0, FW_NORMAL, 0, 0, 0, SHIFTJIS_CHARSET, OUT_DEFAULT_PRECIS,
+                               CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, f.c_str());
+    SetTextColor(g_font.dc, RGB(255, 255, 255));
+    SetBkColor(g_font.dc, RGB(0, 0, 0));
+    SetBkMode(g_font.dc, OPAQUE);
+}
+static void font_draw(const wchar_t* s, int len, int w, uint8_t* out, int stride_bytes, HFONT font = nullptr) {
+    RECT rc = {0, 0, 16, 16};
+    SelectObject(g_font.dc, font ? font : g_font.font16);
+    ExtTextOutW(g_font.dc, 0, 0, ETO_OPAQUE, &rc, s, (UINT)len, nullptr);
+    GdiFlush();
+    for (int y = 0; y < 16; y++) {
+        for (int bx = 0; bx < stride_bytes; bx++) {
+            uint8_t v = 0;
+            for (int k = 0; k < 8; k++) {
+                int x = bx * 8 + k;
+                if (x < w && (g_font.bits[y * 16 + x] & 0x00808080)) v |= (uint8_t)(0x80 >> k);
+            }
+            out[y * stride_bytes + bx] = v;
+        }
+    }
+}
+static int jis_to_wide(uint16_t jis, wchar_t* wc) {
+    int j1 = jis >> 8, j2 = jis & 0xFF;
+    int s1 = ((j1 + 1) >> 1) + (j1 <= 0x5E ? 0x70 : 0xB0);
+    int s2 = j2 + ((j1 & 1) ? (j2 >= 0x60 ? 0x20 : 0x1F) : 0x7E);
+    char sj[3] = {(char)s1, (char)s2, 0};
+    return MultiByteToWideChar(932, MB_ERR_INVALID_CHARS, sj, 2, wc, 4);
+}
+static void cb_narrow(void*, uint16_t jis, uint8_t out[16]) {
+    wchar_t wc[4] = {0};
+    int n = jis_to_wide(jis, wc);
+    if (n <= 0) { memset(out, 0, 16); return; }
+    font_draw(wc, n, 8, out, 1, g_font.font8);
+}
+static void cb_kanji(void*, uint16_t jis, uint8_t out[32]) {
+    int j1 = jis >> 8, j2 = jis & 0xFF;
+    // JIS → シフト JIS
+    int s1 = ((j1 + 1) >> 1) + (j1 <= 0x5E ? 0x70 : 0xB0);
+    int s2 = j2 + ((j1 & 1) ? (j2 >= 0x60 ? 0x20 : 0x1F) : 0x7E);
+    char sj[3] = {(char)s1, (char)s2, 0};
+    wchar_t wc[4] = {0};
+    int n = MultiByteToWideChar(932, MB_ERR_INVALID_CHARS, sj, 2, wc, 4);
+    if (n <= 0) { memset(out, 0, 32); return; }
+    font_draw(wc, n, 16, out, 2);
+}
+// ANK は 0x20-0x7E と半角カナ（0xA1-0xDF）だけをもらう。
+// それ以外（罫線・ブロック・記号・年月日…）は擬似漢字 ROM（core/fontrom.cpp）が作る。
+static void cb_ank(void*, uint8_t c, uint8_t out[16]) {
+    wchar_t wc[2] = {0};
+    if (c == 0x5C) wc[0] = 0x00A5;                       // PC-98 の 5Ch は円記号
+    else if (c >= 0x20 && c < 0x7F) wc[0] = c;
+    else if (c >= 0xA1 && c <= 0xDF) { char b = (char)c; MultiByteToWideChar(932, 0, &b, 1, wc, 2); }
+    if (!wc[0]) { memset(out, 0, 16); return; }
+    font_draw(wc, 1, 8, out, 1);
+}
+
+// ---- キー変換（スキャンコード → PC-98）-----------------------------------------
+static int map_key(UINT scan, bool ext) {
+    if (!ext) {
+        switch (scan) {
+        case 0x01: return 0x00;
+        case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: case 0x07: case 0x08: case 0x09: case 0x0A: case 0x0B:
+            return (int)scan - 1;
+        case 0x0C: return 0x0B;  case 0x0D: return 0x0C;  case 0x7D: return 0x0D;
+        case 0x0E: return 0x0E;  case 0x0F: return 0x0F;
+        case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x17: case 0x18: case 0x19:
+            return (int)scan;
+        case 0x1A: return 0x1A;  case 0x1B: return 0x1B;  case 0x1C: return 0x1C;
+        case 0x1D: return 0x74;
+        case 0x1E: case 0x1F: case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25: case 0x26:
+            return (int)scan - 1;
+        case 0x27: return 0x26;  case 0x28: return 0x27;  case 0x2B: return 0x28;
+        case 0x2A: case 0x36: return 0x70;
+        case 0x2C: case 0x2D: case 0x2E: case 0x2F: case 0x30: case 0x31: case 0x32:
+            return (int)scan - 3;
+        case 0x33: return 0x30;  case 0x34: return 0x31;  case 0x35: return 0x32;  case 0x73: return 0x33;
+        case 0x37: return 0x45;
+        case 0x38: return 0x73;
+        case 0x39: return 0x34;
+        case 0x3A: return 0x71;
+        case 0x3B: case 0x3C: case 0x3D: case 0x3E: case 0x3F: case 0x40: case 0x41: case 0x42: case 0x43: case 0x44:
+            return 0x62 + (int)scan - 0x3B;
+        case 0x47: return 0x42; case 0x48: return 0x43; case 0x49: return 0x44; case 0x4A: return 0x40;
+        case 0x4B: return 0x46; case 0x4C: return 0x47; case 0x4D: return 0x48; case 0x4E: return 0x49;
+        case 0x4F: return 0x4A; case 0x50: return 0x4B; case 0x51: return 0x4C; case 0x52: return 0x4E; case 0x53: return 0x50;
+        case 0x70: return 0x72;   // カタカナ/ひらがな → カナ
+        case 0x79: return 0x35;   // 変換 → XFER
+        case 0x7B: return 0x51;   // 無変換 → NFER
+        case 0x46: return 0x60;   // ScrollLock → STOP
+        }
+        return -1;
+    }
+    switch (scan) {
+    case 0x1C: return 0x1C;
+    case 0x1D: return 0x74;
+    case 0x35: return 0x41;
+    case 0x38: return 0x73;
+    case 0x47: return 0x3E;
+    case 0x48: return 0x3A;
+    case 0x49: return 0x37;   // PageUp   → ROLL DOWN
+    case 0x4B: return 0x3B;
+    case 0x4D: return 0x3C;
+    case 0x4F: return 0x3F;   // End      → HELP
+    case 0x50: return 0x3D;
+    case 0x51: return 0x36;   // PageDown → ROLL UP
+    case 0x52: return 0x38;
+    case 0x53: return 0x39;
+    case 0x37: return 0x61;   // PrintScreen → COPY
+    }
+    return -1;
+}
+
+// ---- 音（waveOut）-------------------------------------------------------------
+struct AudioOut {
+    HWAVEOUT h = nullptr;
+    std::deque<WAVEHDR*> queue;
+    int rate = 44100;
+    bool ok = false;
+    void open(int r) {
+        rate = r;
+        WAVEFORMATEX wf = {};
+        wf.wFormatTag = WAVE_FORMAT_PCM; wf.nChannels = 2; wf.nSamplesPerSec = (DWORD)r;
+        wf.wBitsPerSample = 16; wf.nBlockAlign = 4; wf.nAvgBytesPerSec = (DWORD)r * 4;
+        ok = waveOutOpen(&h, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL) == MMSYSERR_NOERROR;
+    }
+    void reap() {
+        while (!queue.empty() && (queue.front()->dwFlags & WHDR_DONE)) {
+            WAVEHDR* w = queue.front(); queue.pop_front();
+            waveOutUnprepareHeader(h, w, sizeof(*w));
+            delete[] w->lpData; delete w;
+        }
+    }
+    int queued_frames() { reap(); return (int)queue.size(); }
+    void push(const int16_t* s, size_t n_int16) {
+        if (!ok || !n_int16) return;
+        reap();
+        WAVEHDR* w = new WAVEHDR();
+        memset(w, 0, sizeof(*w));
+        w->dwBufferLength = (DWORD)(n_int16 * 2);
+        w->lpData = new char[w->dwBufferLength];
+        memcpy(w->lpData, s, w->dwBufferLength);
+        waveOutPrepareHeader(h, w, sizeof(*w));
+        waveOutWrite(h, w, sizeof(*w));
+        queue.push_back(w);
+    }
+    void close() {
+        if (!h) return;
+        waveOutReset(h);
+        reap();
+        waveOutClose(h);
+        h = nullptr;
+    }
+};
+static AudioOut g_audio;
+static void midi_all_off();
+static void audio_flush() { if (g_audio.h) { waveOutReset(g_audio.h); g_audio.reap(); } midi_all_off(); }
+
+// ---- MIDI（MPU-PC98II の出口）--------------------------------------------------
+static HMIDIOUT g_midi = nullptr;
+static void midi_sink(void*, const uint8_t* msg, int len) {
+    if (!g_midi || len <= 0) return;
+    if (msg[0] == 0xF0) {
+        std::vector<char> buf(msg, msg + len);
+        MIDIHDR hd = {};
+        hd.lpData = buf.data(); hd.dwBufferLength = (DWORD)len;
+        if (midiOutPrepareHeader(g_midi, &hd, sizeof(hd)) != MMSYSERR_NOERROR) return;
+        if (midiOutLongMsg(g_midi, &hd, sizeof(hd)) == MMSYSERR_NOERROR) {
+            for (int i = 0; i < 200 && !(hd.dwFlags & MHDR_DONE); i++) Sleep(1);
+        }
+        midiOutUnprepareHeader(g_midi, &hd, sizeof(hd));
+        return;
+    }
+    DWORD w = msg[0] | (len > 1 ? (msg[1] << 8) : 0) | (len > 2 ? (msg[2] << 16) : 0);
+    midiOutShortMsg(g_midi, w);
+}
+static void midi_all_off() {
+    if (!g_midi) return;
+    for (int ch = 0; ch < 16; ch++) { midiOutShortMsg(g_midi, 0x7BB0 | ch); midiOutShortMsg(g_midi, 0x78B0 | ch); }
+}
+
+// ---- マウスの捕獲 --------------------------------------------------------------
+static void update_title();
+static void set_capture(bool on) {
+    if (on == g_captured) return;
+    g_captured = on;
+    if (on) {
+        RECT rc; GetClientRect(g_hwnd, &rc);
+        POINT a = {rc.left, rc.top}, b = {rc.right, rc.bottom};
+        ClientToScreen(g_hwnd, &a); ClientToScreen(g_hwnd, &b);
+        RECT clip = {a.x, a.y, b.x, b.y};
+        ClipCursor(&clip);
+        while (ShowCursor(FALSE) >= 0) {}
+        SetCapture(g_hwnd);
+    } else {
+        ClipCursor(nullptr);
+        while (ShowCursor(TRUE) < 0) {}
+        ReleaseCapture();
+        g_mouse_btn = 0;
+        if (g_p) machine_mouse(g_p->m, 0, 0, 0);
+    }
+    update_title();
+}
+
+static void update_title() {
+    std::wstring t = g_title;
+    t += L"  [F11: ロード / Shift+F11: セーブ]";
+    if (g_captured) t += L"  [マウス使用中: F12 で解放]";
+    else t += L"  [クリックでマウスを使う]";
+    if (g_turbo) t += L"  [早送り]";
+    SetWindowTextW(g_hwnd, t.c_str());
+}
+
+// ---- 窓 ------------------------------------------------------------------------
+static void window_size_for_scale(int scale, int* w, int* h) {
+    RECT rc = {0, 0, 640 * scale, 400 * scale};
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+    *w = rc.right - rc.left; *h = rc.bottom - rc.top;
+}
+static void toggle_fullscreen() {
+    DWORD style = (DWORD)GetWindowLongW(g_hwnd, GWL_STYLE);
+    if (!g_full) {
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetWindowPlacement(g_hwnd, &g_wp) && GetMonitorInfoW(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+            SetWindowLongW(g_hwnd, GWL_STYLE, (LONG)(style & ~WS_OVERLAPPEDWINDOW));
+            SetWindowPos(g_hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                         mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                         SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            g_full = true;
+        }
+    } else {
+        SetWindowLongW(g_hwnd, GWL_STYLE, (LONG)(style | WS_OVERLAPPEDWINDOW));
+        SetWindowPlacement(g_hwnd, &g_wp);
+        SetWindowPos(g_hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        g_full = false;
+    }
+    if (g_captured) { set_capture(false); set_capture(true); }
+}
+
+// ---- ステートセーブ／ロードのスロット選択画面 --------------------------------
+//  Shift+F11 = 保存、F11 = 読み込み。開いている間はエミュレーションを止め、
+//  ゲーム画面を暗くした上にスロットを 4x2 で並べる。
+enum { MENU_NONE = 0, MENU_SAVE = 1, MENU_LOAD = 2 };
+static int      g_menu = MENU_NONE;
+static int      g_sel = 0;
+static SlotInfo g_slots[STATE_SLOTS];
+static std::wstring g_menu_note;          // メニュー内の一言（空きスロットを選んだ等）
+static std::wstring g_toast;              // 閉じた後にしばらく出す結果
+static DWORD    g_toast_until = 0;
+static const int MENU_COLS = 4, CELL_W = 150, CELL_H = 146, GRID_X = 20, GRID_Y = 62;
+
+static void menu_open(int kind) {
+    if (!g_p) return;
+    set_capture(false);
+    for (int k = 0; k < 128; k++) if (g_p->m->kb_down[k]) machine_key(g_p->m, (uint8_t)k, false);
+    for (int i = 0; i < STATE_SLOTS; i++) state_slot_info(g_p->ps.cfg.root, i, &g_slots[i]);
+    g_menu = kind;
+    g_menu_note.clear();
+    g_toast_until = 0;
+    if (kind == MENU_LOAD && !g_slots[g_sel].used) {   // 読み込みは中身のあるスロットへ寄せる
+        for (int i = 0; i < STATE_SLOTS; i++) if (g_slots[i].used) { g_sel = i; break; }
+    }
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+static void menu_close() {
+    g_menu = MENU_NONE;
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+static void show_toast(const std::wstring& t) { g_toast = t; g_toast_until = GetTickCount() + 2500; }
+
+static void audio_flush();
+static void menu_decide() {
+    std::string err;
+    wchar_t buf[128];
+    if (g_menu == MENU_SAVE) {
+        if (g_p->save_state(g_sel, &err)) { swprintf(buf, 128, L"スロット %d に保存しました", g_sel + 1); show_toast(buf); menu_close(); }
+        else g_menu_note = L"保存できませんでした: " + W(err);
+    } else if (g_menu == MENU_LOAD) {
+        if (!g_slots[g_sel].used) { g_menu_note = L"このスロットは空です"; InvalidateRect(g_hwnd, nullptr, FALSE); return; }
+        if (g_p->load_state(g_sel, &err)) {
+            audio_flush();
+            swprintf(buf, 128, L"スロット %d から再開しました", g_sel + 1); show_toast(buf); menu_close();
+        } else g_menu_note = L"読み込めませんでした: " + W(err);
+    }
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+// 画面上の表示領域（640x400 を縦横比を保って置いた矩形）
+static void view_rect(int cw, int ch, int* dx, int* dy, int* dw, int* dh) {
+    *dw = cw; *dh = cw * 400 / 640;
+    if (*dh > ch) { *dh = ch; *dw = ch * 640 / 400; }
+    *dx = (cw - *dw) / 2; *dy = (ch - *dh) / 2;
+}
+// クライアント座標 → スロット番号（無ければ -1）
+static int menu_hit(int x, int y) {
+    RECT rc; GetClientRect(g_hwnd, &rc);
+    int dx, dy, dw, dh; view_rect(rc.right, rc.bottom, &dx, &dy, &dw, &dh);
+    if (dw <= 0) return -1;
+    double lx = (x - dx) * 640.0 / dw, ly = (y - dy) * 400.0 / dh;
+    for (int i = 0; i < STATE_SLOTS; i++) {
+        int cx = GRID_X + (i % MENU_COLS) * CELL_W, cy = GRID_Y + (i / MENU_COLS) * CELL_H;
+        if (lx >= cx && lx < cx + CELL_W - 6 && ly >= cy && ly < cy + CELL_H - 8) return i;
+    }
+    return -1;
+}
+
+static void draw_text(HDC dc, int x, int y, int size, COLORREF col, const std::wstring& t, bool center, int width) {
+    HFONT f = CreateFontW(-size, 0, 0, 0, FW_BOLD, 0, 0, 0, SHIFTJIS_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                          ANTIALIASED_QUALITY, FF_MODERN, L"ＭＳ ゴシック");
+    HGDIOBJ old = SelectObject(dc, f);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, col);
+    if (center) { RECT r = {x, y, x + width, y + size * 2}; DrawTextW(dc, t.c_str(), (int)t.size(), &r, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_NOPREFIX); }
+    else TextOutW(dc, x, y, t.c_str(), (int)t.size());
+    SelectObject(dc, old);
+    DeleteObject(f);
+}
+
+static void draw_menu(HDC dc, int dx, int dy, int dw, int dh) {
+    double k = dw / 640.0;
+    auto X = [&](double v) { return dx + (int)(v * k); };
+    auto Y = [&](double v) { return dy + (int)(v * k); };
+    auto S = [&](double v) { return (int)(v * k + 0.5); };
+    (void)dh;
+    bool save = g_menu == MENU_SAVE;
+    draw_text(dc, X(0), Y(14), S(20), save ? RGB(255, 210, 120) : RGB(140, 210, 255),
+              save ? L"ステートセーブ ― 保存するスロットを選んでください" : L"ステートロード ― 読み込むスロットを選んでください",
+              true, S(640));
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = STATE_THUMB_W; bi.bmiHeader.biHeight = -STATE_THUMB_H;
+    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
+    std::vector<uint32_t> px(STATE_THUMB_W * STATE_THUMB_H);
+    for (int i = 0; i < STATE_SLOTS; i++) {
+        int cx = GRID_X + (i % MENU_COLS) * CELL_W, cy = GRID_Y + (i / MENU_COLS) * CELL_H;
+        bool sel = i == g_sel;
+        // 枠
+        HBRUSH frame = CreateSolidBrush(sel ? (save ? RGB(255, 200, 60) : RGB(80, 190, 255)) : RGB(90, 90, 110));
+        RECT fr = {X(cx), Y(cy), X(cx + CELL_W - 6), Y(cy + CELL_H - 8)};
+        FillRect(dc, &fr, frame);
+        DeleteObject(frame);
+        HBRUSH bg = CreateSolidBrush(sel ? RGB(40, 40, 60) : RGB(20, 20, 28));
+        int bw = sel ? 3 : 1;
+        RECT in = {fr.left + S(bw), fr.top + S(bw), fr.right - S(bw), fr.bottom - S(bw)};
+        FillRect(dc, &in, bg);
+        DeleteObject(bg);
+        // 縮小画像
+        int tx = cx + 7, ty = cy + 7, tw = 130, th = 81;
+        const SlotInfo& si = g_slots[i];
+        if (si.used && si.thumb.size() == px.size() * 3) {
+            for (size_t j = 0; j < px.size(); j++)
+                px[j] = ((uint32_t)si.thumb[j * 3] << 16) | ((uint32_t)si.thumb[j * 3 + 1] << 8) | si.thumb[j * 3 + 2];
+            SetStretchBltMode(dc, HALFTONE); SetBrushOrgEx(dc, 0, 0, nullptr);
+            StretchDIBits(dc, X(tx), Y(ty), S(tw), S(th), 0, 0, STATE_THUMB_W, STATE_THUMB_H, px.data(), &bi, DIB_RGB_COLORS, SRCCOPY);
+        } else {
+            HBRUSH e = CreateSolidBrush(RGB(34, 34, 44));
+            RECT er = {X(tx), Y(ty), X(tx) + S(tw), Y(ty) + S(th)};
+            FillRect(dc, &er, e); DeleteObject(e);
+            draw_text(dc, X(tx), Y(ty + 32), S(14), RGB(110, 110, 130), L"― 空き ―", true, S(tw));
+        }
+        wchar_t lab[32]; swprintf(lab, 32, L"スロット %d", i + 1);
+        draw_text(dc, X(cx + 8), Y(cy + 94), S(14), sel ? RGB(255, 255, 255) : RGB(200, 200, 210), lab, false, 0);
+        draw_text(dc, X(cx + 8), Y(cy + 113), S(12), sel ? RGB(230, 230, 230) : RGB(150, 150, 165),
+                  si.used ? W(si.when) : L"", false, 0);
+    }
+    if (!g_menu_note.empty())
+        draw_text(dc, X(0), Y(354), S(15), RGB(255, 120, 120), g_menu_note, true, S(640));
+    draw_text(dc, X(0), Y(378), S(12), RGB(170, 170, 185),
+              L"カーソルキー / マウス: 選ぶ　　Enter / 左クリック: 決定　　Esc / 右クリック: やめる", true, S(640));
+}
+
+static void present(HDC dc) {
+    RECT rc; GetClientRect(g_hwnd, &rc);
+    int cw = rc.right, ch = rc.bottom;
+    if (cw <= 0 || ch <= 0 || !g_p) return;
+    int dx, dy, dw, dh;
+    view_rect(cw, ch, &dx, &dy, &dw, &dh);
+    bool overlay = g_menu != MENU_NONE || GetTickCount() < g_toast_until;
+    HDC mem = dc;
+    HBITMAP bm = nullptr; HGDIOBJ oldbm = nullptr;
+    if (overlay) {   // ちらつかないよう裏で組み立てる
+        mem = CreateCompatibleDC(dc);
+        bm = CreateCompatibleBitmap(dc, cw, ch);
+        oldbm = SelectObject(mem, bm);
+    }
+    HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    if (dy > 0) { RECT r1 = {0, 0, cw, dy}; FillRect(mem, &r1, black); RECT r2 = {0, dy + dh, cw, ch}; FillRect(mem, &r2, black); }
+    if (dx > 0) { RECT r1 = {0, 0, dx, ch}; FillRect(mem, &r1, black); RECT r2 = {dx + dw, 0, cw, ch}; FillRect(mem, &r2, black); }
+    SetStretchBltMode(mem, g_p->ps.smooth ? HALFTONE : COLORONCOLOR);
+    if (g_p->ps.smooth) SetBrushOrgEx(mem, 0, 0, nullptr);
+    if (g_menu != MENU_NONE) {
+        // ゲーム画面を暗くする
+        static std::vector<uint32_t> dim(640 * 400);
+        for (int i = 0; i < 640 * 400; i++) {
+            uint32_t c = g_p->fb[i];
+            dim[i] = (((c >> 16) & 255) * 30 / 100 << 16) | (((c >> 8) & 255) * 30 / 100 << 8) | ((c & 255) * 30 / 100);
+        }
+        StretchDIBits(mem, dx, dy, dw, dh, 0, 0, 640, 400, dim.data(), &g_bmi, DIB_RGB_COLORS, SRCCOPY);
+        draw_menu(mem, dx, dy, dw, dh);
+    } else {
+        StretchDIBits(mem, dx, dy, dw, dh, 0, 0, 640, 400, g_p->fb, &g_bmi, DIB_RGB_COLORS, SRCCOPY);
+        if (GetTickCount() < g_toast_until) {
+            double k = dw / 640.0;
+            int tw = (int)(260 * k), th = (int)(26 * k);
+            RECT r = {dx + (int)(8 * k), dy + (int)(8 * k), dx + (int)(8 * k) + tw, dy + (int)(8 * k) + th};
+            HBRUSH b = CreateSolidBrush(RGB(20, 20, 30)); FillRect(mem, &r, b); DeleteObject(b);
+            draw_text(mem, r.left, r.top + (int)(5 * k), (int)(15 * k), RGB(255, 255, 255), g_toast, true, tw);
+        }
+    }
+    if (overlay) {
+        BitBlt(dc, 0, 0, cw, ch, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, oldbm); DeleteObject(bm); DeleteDC(mem);
+    }
+}
+
+static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CLOSE: DestroyWindow(h); return 0;
+    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_PAINT: { PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps); present(dc); EndPaint(h, &ps); return 0; }
+    case WM_ERASEBKGND: return 1;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE) {
+            set_capture(false);
+            // 離した瞬間に押しっぱなしのキーが残らないよう全部離す
+            if (g_p) for (int k = 0; k < 128; k++) if (g_p->m->kb_down[k]) machine_key(g_p->m, (uint8_t)k, false);
+            if (g_pause_inactive) g_paused_by_focus = true;
+        } else g_paused_by_focus = false;
+        return 0;
+    case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_KEYUP: case WM_SYSKEYUP: {
+        bool down = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
+        UINT scan = (lp >> 16) & 0xFF;
+        bool ext = (lp >> 24) & 1;
+        if (down && wp == VK_RETURN && (GetKeyState(VK_MENU) & 0x8000)) { if (!(lp & (1 << 30))) toggle_fullscreen(); return 0; }
+        if (down && wp == VK_F4 && (GetKeyState(VK_MENU) & 0x8000)) { PostMessageW(h, WM_CLOSE, 0, 0); return 0; }
+        bool first = down && !(lp & (1 << 30));
+        bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (g_menu != MENU_NONE) {
+            // スロット選択中はゲームにキーを渡さない
+            if (!down) return 0;
+            switch (wp) {
+            case VK_LEFT:  g_sel = (g_sel + STATE_SLOTS - 1) % STATE_SLOTS; break;
+            case VK_RIGHT: g_sel = (g_sel + 1) % STATE_SLOTS; break;
+            case VK_UP:    g_sel = (g_sel + STATE_SLOTS - MENU_COLS) % STATE_SLOTS; break;
+            case VK_DOWN:  g_sel = (g_sel + MENU_COLS) % STATE_SLOTS; break;
+            case VK_RETURN: case VK_SPACE: if (first) menu_decide(); return 0;
+            case VK_ESCAPE: if (first) menu_close(); return 0;
+            case VK_F11: if (first) menu_close(); return 0;
+            default: return 0;
+            }
+            g_menu_note.clear();
+            InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
+        if (wp == VK_F11) { if (first) menu_open(shift ? MENU_SAVE : MENU_LOAD); return 0; }
+        if (wp == VK_F12) {
+            if (shift || g_turbo) { g_turbo = down; update_title(); return 0; }   // Shift+F12（押している間）= 早送り
+            if (first) set_capture(!g_captured);
+            return 0;
+        }
+        if (wp == VK_PAUSE) { if (g_p) machine_key(g_p->m, 0x60, down); return 0; }
+        int sc = map_key(scan, ext);
+        if (sc >= 0 && g_p) {
+            bool repeat = down && (lp & (1 << 30));
+            if (!repeat || g_p->ps.cfg.key_repeat) machine_key(g_p->m, (uint8_t)sc, down);
+        }
+        return 0; }
+    case WM_SYSCHAR: case WM_CHAR: return 0;
+    case WM_MOUSEMOVE:
+        if (g_menu != MENU_NONE) {
+            int hit = menu_hit((short)LOWORD(lp), (short)HIWORD(lp));
+            if (hit >= 0 && hit != g_sel) { g_sel = hit; g_menu_note.clear(); InvalidateRect(h, nullptr, FALSE); }
+        }
+        break;
+    case WM_LBUTTONDOWN:
+        if (g_menu != MENU_NONE) {
+            int hit = menu_hit((short)LOWORD(lp), (short)HIWORD(lp));
+            if (hit >= 0) { g_sel = hit; menu_decide(); }
+            return 0;
+        }
+        if (!g_captured && g_p) { set_capture(true); return 0; }
+        g_mouse_btn |= 1; return 0;
+    case WM_LBUTTONUP: g_mouse_btn &= ~1; return 0;
+    case WM_RBUTTONDOWN: if (g_menu != MENU_NONE) { menu_close(); return 0; } if (g_captured) g_mouse_btn |= 2; return 0;
+    case WM_RBUTTONUP: g_mouse_btn &= ~2; return 0;
+    case WM_MBUTTONDOWN: set_capture(false); return 0;
+    case WM_INPUT: {
+        if (!g_captured) break;
+        UINT sz = 0;
+        GetRawInputData((HRAWINPUT)lp, RID_INPUT, nullptr, &sz, sizeof(RAWINPUTHEADER));
+        std::vector<uint8_t> buf(sz);
+        if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, buf.data(), &sz, sizeof(RAWINPUTHEADER)) == sz) {
+            RAWINPUT* ri = (RAWINPUT*)buf.data();
+            if (ri->header.dwType == RIM_TYPEMOUSE && !(ri->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
+                g_mouse_dx += ri->data.mouse.lLastX;
+                g_mouse_dy += ri->data.mouse.lLastY;
+            }
+        }
+        break; }
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT && g_captured) { SetCursor(nullptr); return TRUE; }
+        break;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+// ---- 起動時の設定 ---------------------------------------------------------------
+static std::wstring exe_dir() {
+    wchar_t path[MAX_PATH * 2];
+    GetModuleFileNameW(nullptr, path, MAX_PATH * 2);
+    std::wstring p = path;
+    size_t s = p.find_last_of(L"\\/");
+    return s == std::wstring::npos ? L"." : p.substr(0, s);
+}
+static std::wstring upper(std::wstring s) { for (auto& c : s) c = (wchar_t)towupper(c); return s; }
+
+// INI が無いとき: 起動候補を探してひな形を書く
+static std::string guess_start(const std::wstring& dir) {
+    WIN32_FIND_DATAW fd;
+    std::vector<std::wstring> bats, exes;
+    HANDLE hf = FindFirstFileW((dir + L"\\*.*").c_str(), &fd);
+    if (hf != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            std::wstring n = upper(fd.cFileName);
+            size_t d = n.rfind(L'.');
+            if (d == std::wstring::npos) continue;
+            std::wstring ext = n.substr(d), base = n.substr(0, d);
+            if (base == L"PC98PLAYER" || base.find(L"INST") != std::wstring::npos || base == L"AUTOEXEC" || base == L"SETUP" || base == L"CONFIG") continue;
+            if (ext == L".BAT") bats.push_back(n);
+            else if (ext == L".EXE" || ext == L".COM") exes.push_back(n);
+        } while (FindNextFileW(hf, &fd));
+        FindClose(hf);
+    }
+    if (!bats.empty()) return U(bats[0]);
+    if (!exes.empty()) return U(exes[0]);
+    return "";
+}
+static void write_template_ini(const std::wstring& path, const std::string& start) {
+    std::string t =
+        "; PC98PLAYER.INI  -- このフォルダのゲームを PC98PLAYER.EXE で起動するための設定\r\n"
+        "[PC98PLAYER]\r\n"
+        "; 最初に実行するプログラムまたはバッチファイル（引数は Args=）\r\n"
+        "Start=" + start + "\r\n"
+        "Args=\r\n"
+        "; ウインドウの表示倍率（1 で 640x400）\r\n"
+        "Scale=2\r\n"
+        "; 起動時に全画面（Alt+Enter でも切替）\r\n"
+        "FullScreen=0\r\n"
+        "; 拡大時になめらかにする（0=ドットのまま）\r\n"
+        "Smooth=0\r\n"
+        "; 仮想 CPU の速さ（MHz 相当）\r\n"
+        "CpuMHz=16\r\n"
+        "; ゲームのフォルダを何ドライブに見せるか\r\n"
+        "Drive=A\r\n"
+        "; 音源ボード（86 / 26 / 0=なし）と割込み（3/10/12/13）\r\n"
+        "SoundBoard=86\r\n"
+        "SoundIRQ=12\r\n"
+        "; MIDI（MPU-PC98II, E0D0h）を載せる。1 にすると Windows の MIDI 出力へ送る（MidiDevice=-1 は既定の出力）\r\n"
+        "MIDI=0\r\n"
+        "MidiDevice=-1\r\n"
+        "; EMS（EMM386 相当, ページフレーム D000h）と XMS（HIMEM.SYS 相当）。0 で無し\r\n"
+        "EMS=1\r\n"
+        "EMSKB=4096\r\n"
+        "XMS=1\r\n"
+        "XMSKB=8192\r\n"
+        "; 音量（%）\r\n"
+        "Volume=100\r\n"
+        "FMVolume=100\r\n"
+        "SSGVolume=100\r\n"
+        "BeepVolume=50\r\n"
+        "; マウスの速さ（%）\r\n"
+        "MouseSpeed=100\r\n"
+        "; ウインドウのタイトル（空ならフォルダ名）\r\n"
+        "Title=\r\n"
+        "; 漢字の描画に使うフォント\r\n"
+        "Font=ＭＳ ゴシック\r\n"
+        "; ゲームが終わったら窓を閉じる\r\n"
+        "ExitOnEnd=1\r\n"
+        "; 非アクティブ時に一時停止\r\n"
+        "PauseInactive=0\r\n";
+    // INI は Shift_JIS で書く（メモ帳で開きやすいように）
+    std::wstring wt = W(t);
+    int n = WideCharToMultiByte(932, 0, wt.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string sj(n ? n - 1 : 0, '\0');
+    if (n) WideCharToMultiByte(932, 0, wt.c_str(), -1, &sj[0], n, nullptr, nullptr);
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) { DWORD wr; WriteFile(h, sj.data(), (DWORD)sj.size(), &wr, nullptr); CloseHandle(h); }
+}
+
+// INI は Shift_JIS でも UTF-8 でもよい。読み込み前に UTF-8 へそろえる
+static bool load_ini_any(const std::wstring& path, Ini& ini) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD sz = GetFileSize(h, nullptr), rd = 0;
+    std::string data(sz, '\0');
+    ReadFile(h, &data[0], sz, &rd, nullptr);
+    CloseHandle(h);
+    bool utf8 = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data.c_str(), (int)data.size(), nullptr, 0) > 0;
+    std::string conv = data;
+    if (!utf8) {
+        int n = MultiByteToWideChar(932, 0, data.c_str(), (int)data.size(), nullptr, 0);
+        std::wstring w(n, L'\0');
+        MultiByteToWideChar(932, 0, data.c_str(), (int)data.size(), &w[0], n);
+        conv = U(w);
+    }
+    wchar_t tmp[MAX_PATH], tmpf[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    GetTempFileNameW(tmp, L"p98", 0, tmpf);
+    HANDLE o = CreateFileW(tmpf, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
+    DWORD wr; WriteFile(o, conv.data(), (DWORD)conv.size(), &wr, nullptr); CloseHandle(o);
+    bool ok = ini.load(U(tmpf));
+    DeleteFileW(tmpf);
+    return ok;
+}
+
+int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
+    SetProcessDPIAware();
+    timeBeginPeriod(1);
+    std::wstring dir = exe_dir();
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    std::wstring ini_path = dir + L"\\PC98PLAYER.INI";
+    if (argc >= 2) {
+        std::wstring a = argv[1];
+        DWORD attr = GetFileAttributesW(a.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) { dir = a; ini_path = dir + L"\\PC98PLAYER.INI"; }
+        else if (attr != INVALID_FILE_ATTRIBUTES) {
+            ini_path = a;
+            size_t s = a.find_last_of(L"\\/");
+            if (s != std::wstring::npos) dir = a.substr(0, s);
+        }
+    }
+    // --fontsheet: 擬似漢字 ROM の一覧を PC98FONT.BMP に書き出して終わる（字形の確認用）
+    if (argc >= 2 && lstrcmpiW(argv[1], L"--fontsheet") == 0) {
+        font_init(L"");
+        FontSource fs0; fs0.kanji = cb_kanji; fs0.ank = cb_ank; fs0.narrow = cb_narrow; fs0.user = nullptr;
+        video_set_font(fs0);
+        std::vector<uint32_t> px; int w = 0, h = 0;
+        fontrom_make_sheet(px, &w, &h);
+        std::wstring out = exe_dir() + L"\\PC98FONT.BMP";
+        BITMAPFILEHEADER bf = {}; BITMAPINFOHEADER bi = {};
+        bi.biSize = sizeof(bi); bi.biWidth = w; bi.biHeight = -h; bi.biPlanes = 1; bi.biBitCount = 32;
+        bf.bfType = 0x4D42; bf.bfOffBits = sizeof(bf) + sizeof(bi); bf.bfSize = bf.bfOffBits + (DWORD)(px.size() * 4);
+        HANDLE fh = CreateFileW(out.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        DWORD wr;
+        WriteFile(fh, &bf, sizeof(bf), &wr, nullptr); WriteFile(fh, &bi, sizeof(bi), &wr, nullptr);
+        WriteFile(fh, px.data(), (DWORD)(px.size() * 4), &wr, nullptr); CloseHandle(fh);
+        MessageBoxW(nullptr, (L"書き出しました: " + out).c_str(), L"PC98PLAYER", MB_ICONINFORMATION);
+        return 0;
+    }
+    if (GetFileAttributesW(ini_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::string st = guess_start(dir);
+        write_template_ini(ini_path, st);
+        std::wstring msg = L"PC98PLAYER.INI が無かったので、ひな形を作りました。\n\n";
+        msg += st.empty() ? L"起動するファイルが見つかりません。INI の Start= に書いてから、もう一度起動してください。"
+                          : (L"Start=" + W(st) + L" で起動します。違う場合は INI を書き換えてください。");
+        MessageBoxW(nullptr, msg.c_str(), L"PC98PLAYER", MB_ICONINFORMATION);
+        if (st.empty()) return 1;
+    }
+    Ini ini;
+    load_ini_any(ini_path, ini);
+    PlayerSettings ps;
+    player_settings_from_ini(ini, U(dir), &ps);
+    if (ps.cfg.start.empty()) {
+        MessageBoxW(nullptr, L"PC98PLAYER.INI の Start= が空です。最初に実行するファイル名を書いてください。", L"PC98PLAYER", MB_ICONERROR);
+        return 1;
+    }
+    if (ps.cfg.trace && !_wgetenv(L"PC98PLAYER_LOG")) {
+        // Trace=1: ゲームのフォルダの PC98PLAYER.LOG へ記録する（plog は Shift_JIS ではなく UTF-8 で書く）
+        std::string lp = hostfs::join(ps.cfg.root, "PC98PLAYER.LOG");
+        std::wstring e = L"PC98PLAYER_LOG=" + W(lp);
+        _wputenv(e.c_str());
+        std::string ac(MAX_PATH * 3, '\0');
+        int n = WideCharToMultiByte(CP_ACP, 0, W(lp).c_str(), -1, &ac[0], (int)ac.size(), nullptr, nullptr);
+        if (n > 0) { ac.resize(n - 1); _putenv(("PC98PLAYER_LOG=" + ac).c_str()); }
+    }
+    g_mouse_speed = ini.geti("PC98PLAYER.MOUSESPEED", 100);
+    g_pause_inactive = ini.geti("PC98PLAYER.PAUSEINACTIVE", 0) != 0;
+
+    font_init(W(ps.font_name));
+    FontSource fs; fs.kanji = cb_kanji; fs.ank = cb_ank; fs.narrow = cb_narrow; fs.user = nullptr;
+    video_set_font(fs);
+
+    g_title = ps.title.empty() ? W(ps.cfg.root.substr(ps.cfg.root.find_last_of("\\/") == std::string::npos ? 0 : ps.cfg.root.find_last_of("\\/") + 1)) : W(ps.title);
+    g_title += L" - PC98PLAYER";
+
+    WNDCLASSEXW wc = { sizeof(wc) };
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = wndproc;
+    wc.hInstance = inst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+    wc.lpszClassName = L"PC98PLAYER";
+    RegisterClassExW(&wc);
+    int ww, wh;
+    window_size_for_scale(ps.scale, &ww, &wh);
+    g_hwnd = CreateWindowExW(0, L"PC98PLAYER", g_title.c_str(), WS_OVERLAPPEDWINDOW,
+                             CW_USEDEFAULT, CW_USEDEFAULT, ww, wh, nullptr, nullptr, inst, nullptr);
+    memset(&g_bmi, 0, sizeof(g_bmi));
+    g_bmi.bmiHeader.biSize = sizeof(g_bmi.bmiHeader);
+    g_bmi.bmiHeader.biWidth = 640; g_bmi.bmiHeader.biHeight = -400;
+    g_bmi.bmiHeader.biPlanes = 1; g_bmi.bmiHeader.biBitCount = 32;
+
+    RAWINPUTDEVICE rid = {0x01, 0x02, 0, g_hwnd};
+    RegisterRawInputDevices(&rid, 1, sizeof(rid));
+
+    g_p = new Player();
+    std::string err;
+    if (!g_p->init(ps, &err)) {
+        MessageBoxW(nullptr, W(err).c_str(), L"PC98PLAYER", MB_ICONERROR);
+        return 1;
+    }
+    g_audio.open(ps.sample_rate);
+    if (ps.cfg.midi) {
+        UINT dev = ps.midi_device < 0 ? MIDI_MAPPER : (UINT)ps.midi_device;
+        if (midiOutOpen(&g_midi, dev, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) g_midi = nullptr;
+        g_p->midi_sink = midi_sink;
+    }
+    ShowWindow(g_hwnd, show);
+    if (ps.fullscreen) toggle_fullscreen();
+    update_title();
+
+    LARGE_INTEGER freq, now;
+    QueryPerformanceFrequency(&freq);
+    const double frame_sec = (double)FRAME_TICKS / MASTER_CLOCK;
+    QueryPerformanceCounter(&now);
+    double next = (double)now.QuadPart / freq.QuadPart;
+    bool running = true;
+    bool ended_notice = false;
+    while (running) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) { running = false; break; }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!running) break;
+        QueryPerformanceCounter(&now);
+        double t = (double)now.QuadPart / freq.QuadPart;
+        if (g_paused_by_focus) { Sleep(20); next = t; continue; }
+        if (g_menu != MENU_NONE) {
+            // 止めている間は溜まった音を捨て、入力を待つだけ
+            if (g_audio.queued_frames()) audio_flush();
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 50, QS_ALLINPUT);
+            next = t;
+            continue;
+        }
+        if (!g_turbo && t < next) {
+            double wait = next - t;
+            DWORD ms = (DWORD)(wait * 1000.0);
+            if (ms > 0) MsgWaitForMultipleObjects(0, nullptr, FALSE, ms, QS_ALLINPUT);
+            continue;
+        }
+        // マウスを送る
+        if (g_captured) {
+            int dx = g_mouse_dx * g_mouse_speed / 100, dy = g_mouse_dy * g_mouse_speed / 100;
+            g_mouse_dx = 0; g_mouse_dy = 0;
+            machine_mouse(g_p->m, dx, dy, g_mouse_btn);
+        }
+        int frames = g_turbo ? 8 : 1;
+        for (int i = 0; i < frames; i++) {
+            g_p->run_frame(i == frames - 1);
+            if (!g_turbo) {
+                int q = g_audio.queued_frames();
+                if (q < 12) {
+                    if (q == 0) {   // 途切れたら少し先行させる
+                        std::vector<int16_t> sil(g_p->audio.size() * 2, 0);
+                        g_audio.push(sil.data(), sil.size());
+                    }
+                    g_audio.push(g_p->audio.data(), g_p->audio.size());
+                }
+            }
+        }
+        next += frame_sec;
+        if (t - next > 0.25) next = t;
+        HDC dc = GetDC(g_hwnd);
+        present(dc);
+        ReleaseDC(g_hwnd, dc);
+
+        if (g_p->m->quit && !ended_notice) {
+            ended_notice = true;
+            if (g_p->m->quit == 2) {
+                MessageBoxW(g_hwnd, (L"エミュレーションを続けられなくなりました。\n" + W(g_p->m->status)).c_str(), L"PC98PLAYER", MB_ICONWARNING);
+                running = false;
+            } else if (g_p->ps.exit_on_end) running = false;
+        }
+    }
+    set_capture(false);
+    g_audio.close();
+    if (g_midi) { midi_all_off(); midiOutReset(g_midi); midiOutClose(g_midi); g_midi = nullptr; }
+    g_p->shutdown();
+    timeEndPeriod(1);
+    return 0;
+}
