@@ -108,6 +108,17 @@ struct Mpu {
     uint8_t  rcnt, rpos;
     uint8_t  pending_cmd;           // D0h-DFh の直後
     uint8_t  last;                  // 最後に読ませた値
+    // インテリジェントモード
+    uint8_t  expect;                // 次のデータ（E0h-EFh の値）を待っているコマンド
+    uint8_t  msg_left;              // D0h-D7h の後、送る MIDI メッセージの残りバイト数
+    uint8_t  sysex;                 // DFh の後、F7h まで送る
+    uint8_t  run_status;            // ランニングステータス
+    uint8_t  tempo;                 // E0h（既定 100）
+    uint8_t  timebase;              // C2h-C8h（既定 120）
+    uint8_t  cth_rate;              // E7h（既定 240）: 内部クロック rate/4 ごとに FDh
+    uint8_t  cth_on;                // 95h/94h
+    uint8_t  rel_tempo;             // E1h 相対テンポ（40h=等倍。0 は旧セーブで 40h 扱い）
+    int64_t  cth_acc;               // 次の FDh までの基準クロック
 };
 
 struct Config {
@@ -124,6 +135,13 @@ struct Config {
     int      key_repeat = 1;
     int      trace = 0;
     int      dos_version = 0x0500;   // 5.00（上位=メジャー）
+    int      fake_year = 0;          // 0 以外: 年だけこの値に置き換える（2000 年問題対策）
+    std::string floppy_image;        // 起動時に入れるフロッピーイメージ（空なら無し）
+    char     floppy_drive = 'B';     // フロッピーのドライブ名
+    char     current_drive = 0;      // 起動時のカレントドライブ（0 = Start= のドライブ、無ければゲームのドライブ）
+    int      free_mb = 96;           // ゲームのドライブの空き容量として見せる大きさ（MB）
+    int      fake_date = 0;          // 0 以外: YYYYMMDD。起動した日をこの日付として、以後は実時間で進める
+    int      first_mcb = 0x0200;     // 先頭 MCB のセグメント（実機の DOS に近い位置へ）
     int      midi = 0;               // PC-9801-86 の PCM（pcm86.cpp）
 struct Pcm86 {
     uint8_t  ctrl;          // A468h（bit4 の割込みフラグは irqflag に分けて持つ）
@@ -140,6 +158,7 @@ struct PcmSample { uint64_t tick; int16_t l, r; };
 
 // MPU-PC98II（E0D0h）を載せる。0 = 無し
     int      midi_irq = 6;           // INT2
+    int      midi_speed = 100;       // MIDI の演奏速度の補正（%）。MPU のクロックだけを速める
     bool     ems = true;             // EMM386 相当（LIM EMS 4.0、ページフレーム D000h）
     int      ems_kb = 4096;
     int      xms_kb = 8192;          // HIMEM.SYS 相当（XMS 3.0）。0 で無し
@@ -268,9 +287,16 @@ void fontrom_gaiji_write(uint16_t jis, int line, bool left, uint8_t v);
 void fontrom_reset_gaiji();
 void fontrom_make_sheet(std::vector<uint32_t>& px, int* w, int* h);
 
+// 日付（INI の FakeYear= / FakeDate= を反映した現在時刻）
+struct PcTime { int year, month, day, wday, hour, min, sec; };
+void     machine_now(Machine* m, PcTime* t);
+uint16_t machine_file_date(Machine* m, uint16_t dos_date);   // ファイルの日付を「今日」より後にしない
+
 // bios.cpp
 void bios_init(Machine* m);
 void bios_hle(Machine* m, uint8_t n);
+void lio_init(Machine* m);
+void lio_hle(Machine* m, uint8_t n);
 void bios_key_irq(Machine* m);
 void console_putc(Machine* m, uint8_t c);
 void console_reset(Machine* m);
@@ -322,6 +348,7 @@ enum {
     HLE_INT33      = 0x33,
     HLE_INTDC      = 0xDC,
     HLE_INT67      = 0x67,
+    HLE_LIO        = 0xA0,   // 0xA0-0xAF: グラフィック LIO（INT A0h-AFh）
     HLE_XMS        = 0xE0,
     HLE_SHELL      = 0xFD,   // シェル（バッチ）の次の行へ
     HLE_EXIT       = 0xFE,

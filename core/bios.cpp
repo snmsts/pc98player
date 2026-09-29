@@ -7,6 +7,7 @@
 //  MS-DOS のコンソール出力（ESC シーケンスつき）をここで扱う。
 // -----------------------------------------------------------------------------
 #include "machine.h"
+#include "floppy.h"
 #include <string.h>
 #include <time.h>
 #include <stdio.h>
@@ -129,6 +130,7 @@ struct Console {
     int rows;
 };
 static Console s_con;
+static bool s_rev_by_bg;   // 反転が 40-47 由来か（con_sgr を参照）
 
 static void con_cell(Machine* m, int x, int y, uint16_t code, uint8_t attr) {
     if (x < 0 || x >= 80 || y < 0 || y >= 25) return;
@@ -149,32 +151,46 @@ static void con_newline(Machine* m) {
     s_con.y++;
     if (s_con.y >= s_con.rows) { s_con.y = s_con.rows - 1; con_scroll(m); }
 }
+// MS-DOS のワークエリア: 0000:071Ch = カーソルの桁、0000:0710h = カーソルの行（Borland C の conio などが直接読み書きする）
 static void con_sync_cursor(Machine* m) {
     m->gdcm.ead = (uint32_t)(s_con.y * 80 + s_con.x);
+    m->ram[0x71C] = (uint8_t)s_con.x;
+    m->ram[0x710] = (uint8_t)s_con.y;
+}
+static void con_load_state(Machine* m) {
+    s_con.attr = m->ram[0x71D];
+    int x = m->ram[0x71C], y = m->ram[0x710];
+    if (x < 80) s_con.x = x;
+    if (y < s_con.rows) s_con.y = y;
 }
 void console_reset(Machine* m) {
     memset(&s_con, 0, sizeof(s_con));
     s_con.attr = 0xE1;
     s_con.rows = 25;
+    s_rev_by_bg = false;
     (void)m;
 }
+// 40-47（色つき反転）で付いた反転は、続く 30-37 で外れる（NEC の ANSI の振る舞い。
+// Ray のメニューは ESC[46m で強調し ESC[36m で戻す）。ESC[7m の反転はそのまま残す。
 static void con_sgr(int n) {
     uint8_t& a = s_con.attr;
-    if (n == 0) a = 0xE1;
+    if (n == 0) { a = 0xE1; s_rev_by_bg = false; }
+    else if (n == 7) { a |= 0x04; s_rev_by_bg = false; }
     else if (n == 1) a |= 0; // 強調なし
     else if (n == 2) a = (uint8_t)((a & 0x1F) | 0xE0 & 0);   // なし
     else if (n == 4) a |= 0x08;
     else if (n == 5) a |= 0x02;
-    else if (n == 7) a |= 0x04;
     else if (n == 8 || n == 16) a &= (uint8_t)~1;
     else if (n >= 30 && n <= 37) {
         static const uint8_t col[8] = {0, 2, 4, 6, 1, 3, 5, 7};   // ANSI -> PC-98 GRB
+        if (s_rev_by_bg) { a &= (uint8_t)~0x04; s_rev_by_bg = false; }
         a = (uint8_t)((a & 0x1F) | (col[n - 30] << 5) | 1);
     } else if (n >= 17 && n <= 23) {
         static const uint8_t col[7] = {2, 4, 6, 1, 3, 5, 7};
         a = (uint8_t)((a & 0x1F) | (col[n - 17] << 5) | 1);
     } else if (n >= 40 && n <= 47) {
         static const uint8_t col[8] = {0, 2, 4, 6, 1, 3, 5, 7};
+        if (!(a & 0x04)) s_rev_by_bg = true;
         a = (uint8_t)((col[n - 40] << 5) | 0x05);
     }
 }
@@ -240,7 +256,16 @@ static void con_csi(Machine* m, char fin) {
     }
 }
 
+static void console_putc_body(Machine* m, uint8_t c);
+// MS-DOS のワークエリア 0000:071Dh が「今の表示属性」。ソフトが直接読み書きするので、ここと常にそろえる
 void console_putc(Machine* m, uint8_t c) {
+    con_load_state(m);
+    console_putc_body(m, c);
+    m->ram[0x71D] = s_con.attr;
+    m->ram[0x71C] = (uint8_t)s_con.x;
+    m->ram[0x710] = (uint8_t)s_con.y;
+}
+static void console_putc_body(Machine* m, uint8_t c) {
     Console& k = s_con;
     if (k.esc) {
         if (k.esc == 1) {
@@ -412,20 +437,14 @@ static inline uint8_t bcd(int v) { return (uint8_t)(((v / 10) << 4) | (v % 10));
 static void int1c(Machine* m) {
     uint8_t ah = AH(m);
     if (ah == 0x00) {
-        time_t t = time(nullptr);
-        struct tm lt;
-#ifdef _WIN32
-        localtime_s(&lt, &t);
-#else
-        localtime_r(&t, &lt);
-#endif
+        PcTime lt; machine_now(m, &lt);
         uint32_t a = lin(m->cpu.sr[ES_], BX(m));
-        mem_wb(m, a + 0, bcd(lt.tm_year % 100));
-        mem_wb(m, a + 1, (uint8_t)(((lt.tm_mon + 1) << 4) | lt.tm_wday));
-        mem_wb(m, a + 2, bcd(lt.tm_mday));
-        mem_wb(m, a + 3, bcd(lt.tm_hour));
-        mem_wb(m, a + 4, bcd(lt.tm_min));
-        mem_wb(m, a + 5, bcd(lt.tm_sec));
+        mem_wb(m, a + 0, bcd(lt.year % 100));
+        mem_wb(m, a + 1, (uint8_t)((lt.month << 4) | lt.wday));
+        mem_wb(m, a + 2, bcd(lt.day));
+        mem_wb(m, a + 3, bcd(lt.hour));
+        mem_wb(m, a + 4, bcd(lt.min));
+        mem_wb(m, a + 5, bcd(lt.sec));
         return;
     }
     if (ah == 0x02 || ah == 0x03) {
@@ -463,6 +482,13 @@ static void int33(Machine* m) {
     case 0x08: ms->miny = (int16_t)CX(m); ms->maxy = (int16_t)DX(m); if (ms->miny > ms->maxy) { int t = ms->miny; ms->miny = ms->maxy; ms->maxy = t; } return;
     case 0x0B: SETCX(m, (uint16_t)ms->hle_dx); SETDX(m, (uint16_t)ms->hle_dy); ms->hle_dx = ms->hle_dy = 0; return;
     case 0x0F: ms->mickey_x = CX(m); ms->mickey_y = DX(m); return;
+    // NEC の MOUSE.COM: 10h = 横の範囲、11h = 縦の範囲（CX=最小, DX=最大）
+    case 0x10: case 0x11: {
+        int lo = (int16_t)CX(m), hi = (int16_t)DX(m);
+        if (lo > hi) { int t = lo; lo = hi; hi = t; }
+        if (ax == 0x10) { ms->minx = lo; ms->maxx = hi; if (ms->x < lo) ms->x = lo; if (ms->x > hi) ms->x = hi; }
+        else { ms->miny = lo; ms->maxy = hi; if (ms->y < lo) ms->y = lo; if (ms->y > hi) ms->y = hi; }
+        return; }
     case 0x21: SETAX(m, 0xFFFF); SETBX(m, 2); return;
     default:
         if (m->cfg.trace) plog("[bios] INT 33h AX=%04Xh 未対応\n", ax);
@@ -475,10 +501,11 @@ static void intdc(Machine* m) {
     uint8_t cl = (uint8_t)CX(m);
     if (cl == 0x10) {
         uint8_t ah = AH(m);
+        con_load_state(m);
         switch (ah) {
         case 0x00: console_putc(m, (uint8_t)DX(m)); return;
         case 0x01: { uint32_t a = lin(m->cpu.sr[DS_], DX(m)); for (int i = 0; i < 4096; i++) { uint8_t c = mem_rb(m, a + i); if (c == '$') break; console_putc(m, c); } return; }
-        case 0x02: s_con.attr = (uint8_t)DX(m); return;
+        case 0x02: s_con.attr = (uint8_t)DX(m); m->ram[0x71D] = s_con.attr; return;
         case 0x03: s_con.x = (uint8_t)DX(m); s_con.y = (uint8_t)(DX(m) >> 8); if (s_con.x > 79) s_con.x = 79; if (s_con.y >= s_con.rows) s_con.y = s_con.rows - 1; con_sync_cursor(m); return;
         case 0x0A: con_clear_range(m, s_con.y * 80 + s_con.x, s_con.y * 80 + 80); return;
         case 0x0A + 1: con_clear_range(m, 0, 80 * 25); return;
@@ -505,7 +532,10 @@ void bios_hle(Machine* m, uint8_t n) {
         pic_update_hint(m);
         return; }
     case HLE_INT1A: SETAH(m, 0x00); return;
-    case HLE_INT1B: SETAH(m, 0x60); set_cf(m, true); return;
+    case HLE_INT1B:
+        if (floppy::is_fd_da(AL(m))) { floppy::bios_int1b(m); return; }
+        if (m->cfg.trace) plog("[fd] INT1B AX=%04X（フロッピー以外の装置: 未接続を返す）\n", (unsigned)(m->cpu.r[EAX] & 0xFFFF));
+        SETAH(m, 0x60); set_cf(m, true); return;
     case HLE_INT1F: SETAH(m, 0x00); set_cf(m, true); return;
     case HLE_INT33: int33(m); return;
     case HLE_INTDC: intdc(m); return;
@@ -519,6 +549,7 @@ void bios_hle(Machine* m, uint8_t n) {
         return; }
     case HLE_NOP: return;
     default:
+        if (n >= HLE_LIO && n < HLE_LIO + 16) { lio_hle(m, n); return; }
         if (m->cfg.trace) plog("[bios] HLE %02X 未対応\n", n);
         return;
     }
@@ -569,8 +600,10 @@ void bios_init(Machine* m) {
     r[0x480] = 0x00;
     r[0x481] = 0x00;
     r[0x458] = 0x00;
-    r[0x55C] = 0x00;
+    r[0x55C] = 0x03;               // 1MB の FDD がユニット 0・1 に付いている（仮想フロッピーはユニット 0）
     r[0x712] = 24;                 // MS-DOS: テキストの行数-1（master.lib などが参照）
+    r[0x71D] = 0xE1;               // 同: 今の表示属性（白）。Borland C の conio などが初期値として読む
+    r[0x714] = 0xE1;               // 同: 画面消去に使う属性
     r[0x710] = 0;                  // 同: カーソル表示など
     kb_clear(m);
     console_reset(m);
@@ -578,6 +611,7 @@ void bios_init(Machine* m) {
     for (int i = 0; i < 0x1000; i++) { m->tvram[i * 2] = 0x20; m->tvram[i * 2 + 1] = 0; m->tvram[0x2000 + i * 2] = 0xE1; }
     // リセットベクタ（使わないが念のため）
     r[0xFFFF0] = 0xF4;
+    lio_init(m);
     // ROM の識別に使われることがある領域
     r[0xFFFFE] = 0xFE;
 }

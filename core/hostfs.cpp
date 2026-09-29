@@ -9,7 +9,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-namespace hostfs {
+namespace hostfs_native {
 static std::wstring W(const std::string& utf8) {
     int n = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
     std::wstring w(n ? n - 1 : 0, L'\0');
@@ -117,7 +117,7 @@ bool get_time(void* h, uint16_t* d, uint16_t* t) {
 #include <utime.h>
 
 #include <iconv.h>
-namespace hostfs {
+namespace hostfs_native {
 static std::string conv(const char* to, const char* from, const std::string& s) {
     iconv_t cd = iconv_open(to, from);
     if (cd == (iconv_t)-1) return s;

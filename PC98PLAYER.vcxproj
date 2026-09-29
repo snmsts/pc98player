@@ -42,7 +42,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>winmm.lib;gdi32.lib;user32.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>winmm.lib;gdi32.lib;user32.lib;shell32.lib;comdlg32.lib;setupapi.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(YmfmPresent)'=='true'">
@@ -65,6 +65,12 @@
     <ClCompile Include="core\rhythm_rom.cpp" />
     <ClCompile Include="core\xmsems.cpp" />
     <ClCompile Include="core\pcm86.cpp" />
+    <ClCompile Include="core\lio.cpp" />
+    <ClCompile Include="core\floppy.cpp" />
+    <ClCompile Include="core\fdflux.cpp" />
+    <ClCompile Include="core\fdreal.cpp" />
+    <ClCompile Include="core\fatfs.cpp" />
+    <ClCompile Include="core\gdcdraw.cpp" />
     <ClCompile Include="win32\main.cpp" />
   </ItemGroup>
   <ItemGroup>

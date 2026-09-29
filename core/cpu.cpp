@@ -595,7 +595,17 @@ static void op0f() {
 
 // ---- 1 命令 ------------------------------------------------------------------
 static uint16_t s_tr_cs, s_tr_ip; static int s_tr_on;
+// デバッグ用: 直近に実行した命令の位置（ITRACE_STOP の CS に入ったら一度だけ出力）
+uint32_t g_itr[256]; unsigned g_itr_pos; int g_itr_stop_cs = -1;
+static void itr_dump() {
+    fprintf(stderr, "[itrace] last instructions:\n");
+    for (unsigned i = 0; i < 256; i++) { uint32_t v = g_itr[(g_itr_pos + i) & 255]; fprintf(stderr, " %04X:%04X", v >> 16, v & 0xFFFF); if ((i & 7) == 7) fprintf(stderr, "\n"); }
+}
 static void step() {
+    if (g_itr_stop_cs >= 0) {
+        if (C->sr[CS_] == (uint16_t)g_itr_stop_cs) { itr_dump(); g_itr_stop_cs = -1; }
+        else g_itr[g_itr_pos++ & 255] = ((uint32_t)C->sr[CS_] << 16) | C->ip;
+    }
     if (s_tr_on && C->ip == s_tr_ip && C->sr[CS_] == s_tr_cs) { s_tr_on = 0; fprintf(stderr, "   -> AX=%04X BX=%04X CX=%04X DX=%04X FL=%04X\n", C->r[EAX] & 0xFFFF, C->r[EBX] & 0xFFFF, C->r[ECX] & 0xFFFF, C->r[EDX] & 0xFFFF, C->fl & 0xFFFF); }
     C->op_ip = C->ip; C->op_cs = C->sr[CS_];
     if (C->sr[CS_] == g_prof_cs && g_prof) g_prof[C->ip]++;

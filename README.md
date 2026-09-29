@@ -13,6 +13,8 @@ GMPV3 Studio の「必要なデバイスの振る舞いと DOS ファンクシ�
 
 `PC98PLAYER.EXE` をダブルクリックすると窓が開き、INI の `Start=` に書いたプログラムまたはバッチから動き出します。
 
+EXE を 1 か所に置いたまま使い回す場合は、ショートカットの「作業フォルダー」にゲームのフォルダを指定してください（作業フォルダーの PC98PLAYER.INI を読みます）。INI の `Root=` でゲームのフォルダを別の場所にすることもできます。
+
 ## 仕組み
 
 実機の ROM・フロッピー/HDD イメージ・MS-DOS 本体は **一切使いません**。
@@ -20,7 +22,7 @@ GMPV3 Studio の「必要なデバイスの振る舞いと DOS ファンクシ�
 | 層 | 中身 |
 |---|---|
 | CPU | i386 リアルモードのインタプリタ（8086/V30/286 上位互換、32bit レジスタ・386 命令込み） |
-| ハードウェア | GDC（テキスト/グラフィック、200 ライン表示）、GRCG、**EGC**、16 色アナログパレット、8259、8253、キーボード、バスマウス、漢字 ROM ポート・外字、YM2608(OPNA)、**86 ボードの PCM**、**MPU-PC98II（MIDI）** |
+| ハードウェア | GDC（テキスト/グラフィック、200 ライン表示）、GRCG、**EGC**、16 色アナログパレット、8259、8253、キーボード、バスマウス、漢字 ROM ポート・外字、YM2608(OPNA)、**86 ボードの PCM**、**MPU-PC98II（MIDI）**、ROM のグラフィック LIO の入口（INT A0h-AFh。初期化系のみ、描画はしない）、**仮想フロッピー**（D88/ベタ/FDI/NFD。INT 1Bh の ID 指定読み書き・READ ID、DOS の FAT12/16 ドライブ、INT 25h/26h） |
 | BIOS | HLE: INT 18h（キー/CRT/グラフィック）、INT 1Ch（時計/インターバルタイマ）、IRQ1、INT 33h、INT DCh |
 | DOS | HLE: INT 21h をゲームのフォルダへ直結（ファイル・FCB・MCB メモリ管理・EXEC・常駐終了・FindFirst・SFT/List of Lists など） |
 | 拡張メモリ | HLE: **HIMEM.SYS（XMS 3.0）** と **EMM386（LIM EMS 4.0、ページフレーム D000h）** |
@@ -45,15 +47,28 @@ SoundBoard=86        ; 86 / 26 / 0（なし）
 SoundIRQ=12          ; 3 / 10 / 12 / 13
 MIDI=0               ; 1 で MPU-PC98II（E0D0h）を載せ、Windows の MIDI 出力へ送る
 MidiDevice=-1        ; MIDI の出力先（-1 = 既定）
+FloppyImage=         ; 起動時に入れるフロッピーイメージ（D88 / ベタ / FDI / NFD / SCP / HFE）。F11 の画面で入れ替え・取り出し
+                     ; 実機のドライブ: FDD:A（USB フロッピー）/ GW・GW:COM5（Greaseweazle。プロテクトつきの正規ディスクも読める）
+GWDrive=A            ; Greaseweazle のドライブ（A / B。Shugart 接続は 0〜2）
+GWRevs=3             ; Greaseweazle で 1 トラックを何回転読むか（1〜8）
+FloppyDrive=B        ; フロッピーのドライブ名（A〜Z。Drive=B と FloppyDrive=A で入れ替えも可）。Start=B:\INSTALL.BAT のようにも書ける
+CurrentDrive=        ; 起動時のカレントドライブ（空 = Start= のドライブ）
+FreeSpaceMB=96       ; ゲームのドライブの空き容量として見せる大きさ（MB）
+MidiSpeedFix=100     ; MIDI の演奏速度 %（10〜1000。MPU のテンポ＝クロック・トゥ・ホストだけを速める）
 EMS=1                ; EMS（EMM386 相当）。EMSKB=4096 で容量
 XMS=1                ; XMS（HIMEM.SYS 相当）。XMSKB=8192 で容量
-Volume=100           ; 全体音量 %（FMVolume / SSGVolume / BeepVolume / PCMVolume もあり）
+FirstMCB=0200        ; 先頭 MCB のセグメント（16 進）。空きメモリの始まり。ソフトによって調整
+FakeYear=            ; 2000 年問題対策: 年だけこの値にする（例 1998）
+FakeDate=            ; 2000 年問題対策: 起動した日をこの日付にする（例 1999/12/31）。以後は実時間で進む
+Volume=100           ; 全体音量 %（0〜1000。100 超はソフトリミッタで割れを抑える。FMVolume / SSGVolume / BeepVolume / PCMVolume もあり）
 MouseSpeed=100       ; マウスの速さ %
 Title=               ; 窓のタイトル（空ならフォルダ名）
 Font=ＭＳ ゴシック    ; 漢字に使うフォント
 KanjiJIS=78          ; 78=PC-98 と同じ旧 JIS の並び / 83=新 JIS
 ExitOnEnd=1          ; ゲーム（バッチ）が終わったら窓を閉じる
 PauseInactive=0      ; 非アクティブ時に止める
+MiddleRelease=1      ; 中ボタン（ホイール）クリックでマウスを放す（0 で無効）
+MouseLockDisable=0   ; 1 でマウスを一切捕まえない（マウスを使わないソフト向け）
 RhythmROM=           ; 本物のリズム ROM（任意。無くても鳴ります）
 ```
 
@@ -71,7 +86,7 @@ INI は Shift_JIS でも UTF-8 でも構いません。`samples\` に 4 本ぶ�
 | Insert / Delete | INS / DEL |
 | Pause または ScrollLock | STOP ／ PrintScreen = COPY |
 | 窓をクリック | マウスを捕まえる（PC-98 のバスマウスとして動く） |
-| F12 / 中クリック | マウスを放す |
+| F12 / 中クリック（ホイール） | マウスを放す（中クリックは MiddleRelease=0 で無効） |
 | **Shift+F11** | **ステートセーブ**（スロット選択画面） |
 | **F11** | **ステートロード**（スロット選択画面） |
 | Shift+F12（押している間） | 早送り |
@@ -119,7 +134,11 @@ PC-98 の漢字 ROM・ANK ROM を、**本物の ROM も第三者のビットマ�
 |---|---|---|
 | 下級生 | KAKYU.BAT | NMD/PLAY5 常駐 → ロゴ → 名前入力画面まで。キー・マウス操作可 |
 | 同級生2 | NANPA2.BAT | FREE/AMD/PLAY5 → ロゴ（FM でジングル再生）→ メニュー → プロローグ確認まで |
-| 瑠璃色の雪 | RURI.COM | MMD 失敗 → PMDB2 に切替・常駐 → AIL ロゴ → メニュー → 本編テキストまで |
+| 瑠璃色の雪 | RURI.COM | MMD 常駐（MIDI=1 時は MPU-PC98II を検出、設定で MIDI 選択可）・PMDB2 常駐 → AIL ロゴ → メニュー → 本編。MIDI 選択時は MMD がクロック通知（FD）割込みで演奏 |
+| 痕（Leaf, 1996） | KIZU.BAT | オープニングの月の場面で、雲を EGC（CPU 転送元・4A4h=1500h・シフトを毎フレーム変える）でプレーンごとに描いて流す |
+| スレイヤーズ！（バンプレスト, 1994） | SL.BAT | マウスの割込み処理がスレーブだけ EOI し、マスタの EOI を IRR 次第で省く → マスタの IR7 が処理中のまま。PC-98 のマスタは特殊完全入れ子モードなので、その間もスレーブの割込み（音源・マウス）を通す |
+| Ray IV2（音楽＆映像ソフト, 1995） | RAY.EXE | RIN.COM 常駐 → LIO の入口を ROM の表から写して GINIT → オープニング → メニュー → 曲の演奏（FM） |
+| メタ女 府立メタトポロジー大学付属女子高校 SP（HDD 版） | MTJ.BAT | MACACHE（LoL から DPB の鎖を辿る）→ RFMOUSE / PCP / PCML 常駐。PCML の音声は PIT で割込み、EOI に 0A0h（回転つき）を使い、86 の A466h bit0（LR クロック）で 1 標本ずつ同期する |
 | LEGAM | LEGAM.EXE | PMD/MMDR 常駐 → タイトル → 新規開始 → マップ・会話・BGM（PMD）再生 |
 | FLEIA | FLEIA.BAT | NA 常駐 → タイトルメニュー（テキスト VRAM の全角文字） |
 | 親父王 | OYAJIO.EXE | 簡易グラフで描くシューティングの画面 |
@@ -162,7 +181,7 @@ PC-98 の漢字 ROM・ANK ROM を、**本物の ROM も第三者のビットマ�
 
 ## まだ無いもの（今後）
 
-- **GDC の描画コマンド**（LINE/ARC 等）、LIO（N88-BASIC 系）
+- LIO（N88-BASIC 系）。GDC の描画コマンド（直線・矩形・円弧・グラフィックキャラクタ）は対応済み
 - ADPCM（86 ボード＋ちびおと、SPB 等の ADPCM RAM）
 - MPU-PC98II のインテリジェントモードの演奏機能（UART モードと、D0h 系の直接送信・問い合わせのみ対応）
 - 保護モード（DOS エクステンダ、VCPI/DPMI）。EMS/XMS は実モードの範囲で使えます

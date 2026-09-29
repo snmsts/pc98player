@@ -245,7 +245,7 @@ void OpnaRenderer::set_balance(double fm, double ssg) {
     Impl* p = (Impl*)impl_;
     if (!p) return;
     p->fm_gain  = fm  < 0 ? 0 : (fm  > 16.0 ? 16.0 : fm);
-    p->ssg_gain = ssg < 0 ? 0 : (ssg >  1.0 ?  1.0 : ssg);
+    p->ssg_gain = ssg < 0 ? 0 : (ssg >  2.0 ?  2.0 : ssg);   // SSGVolume=1000% で 2.0
 }
 
 int OpnaRenderer::available() { return 1; }

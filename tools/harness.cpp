@@ -22,7 +22,9 @@ struct MouseEv { int frame, dx, dy, b; };
 static std::vector<MouseEv> mev;
 static int save_f = -1, save_slot = 0, load_f = -1, load_slot = 0;
 
+#include "../core/floppy.h"
 int main(int argc, char** argv) {
+    std::vector<std::pair<int, std::string>> fdev;   // --fd フレーム:イメージ（フロッピーの入れ替え）
     if (argc < 2) { fprintf(stderr, "usage: harness gamedir [--start cmd] [--frames n] [--shot a,b] [--key f:sc[:u]] [--wav f] [--out prefix]\n"); return 1; }
     std::string dir = argv[1];
     std::string start, out = "shot", wav, ini_path;
@@ -41,12 +43,14 @@ int main(int argc, char** argv) {
         else if (a == "--save") { std::string s2 = next(); sscanf(s2.c_str(), "%d:%d", &save_f, &save_slot); }
         else if (a == "--load") { std::string s2 = next(); sscanf(s2.c_str(), "%d:%d", &load_f, &load_slot); }
         else if (a == "--wav") wav = next();
+        else if (a == "--fd") { std::string s2 = next(); size_t c = s2.find(':'); fdev.push_back({atoi(s2.substr(0, c).c_str()), s2.substr(c + 1)}); }
         else if (a == "--out") out = next();
         else if (a == "--mhz") mhz = atoi(next().c_str());
         else if (a == "--trace") trace = 1; else if (a == "--trace2") trace = 2;
         else if (a == "--ini") ini_path = next();
     }
     extern uint32_t g_watch_lo, g_watch_hi;
+    extern int g_itr_stop_cs; if (getenv("ITRACE_STOP")) g_itr_stop_cs = (int)strtol(getenv("ITRACE_STOP"), 0, 16);
     extern int g_trace_int; if (getenv("TRACEINT")) g_trace_int = (int)strtol(getenv("TRACEINT"), 0, 16);
     extern int g_trace_port_lo, g_trace_port_hi; if (getenv("TRACEPORT")) sscanf(getenv("TRACEPORT"), "%x-%x", &g_trace_port_lo, &g_trace_port_hi);
     if (getenv("WATCH")) { sscanf(getenv("WATCH"), "%x-%x", &g_watch_lo, &g_watch_hi); }
@@ -107,6 +111,11 @@ int main(int argc, char** argv) {
             fprintf(stderr, " 40-4E:"); for (int i = 0x40; i < 0x4F; i++) fprintf(stderr, " %02X", p->m->opna.reg[0][i]);
             fprintf(stderr, " B0-B6:"); for (int i = 0xB0; i < 0xB7; i++) fprintf(stderr, " %02X", p->m->opna.reg[0][i]); fprintf(stderr, "\n"); }
         for (auto& e : mev) if (e.frame == f) machine_mouse(p->m, e.dx, e.dy, e.b);
+        for (auto& e : fdev) if (e.first == f) { std::string er; fprintf(stderr, "fd insert %s: %s\n", e.second.c_str(), floppy::insert(e.second, &er) ? "ok" : er.c_str()); }
+        { extern int g_trace_port_lo, g_trace_port_hi; static int saved_lo = -1, saved_hi = -1;
+          if (getenv("TRACEPORT_FROM")) { int from = atoi(getenv("TRACEPORT_FROM"));
+            if (f == 0) { saved_lo = g_trace_port_lo; saved_hi = g_trace_port_hi; g_trace_port_lo = 1; g_trace_port_hi = 0; }
+            if (f == from) { g_trace_port_lo = saved_lo; g_trace_port_hi = saved_hi; } } }
         bool shot = shots.count(f) > 0 || f == frames - 1; bool rend = shot || getenv("RENDERALL");
         p->run_frame(rend);
         if (!wav.empty()) pcm.insert(pcm.end(), p->audio.begin(), p->audio.end());
@@ -141,7 +150,7 @@ int main(int argc, char** argv) {
         for (int pl = 0; pl < 4; pl++) { fprintf(stderr, "plane%d:", pl); for (int b = 20; b < 60; b++) fprintf(stderr, " %02X", p->m->gvram[p->m->disp_bank][pl][y * 80 + b]); fprintf(stderr, "\n"); }
         fprintf(stderr, "analog=%d pal:", p->m->analog); for (int i = 0; i < 16; i++) fprintf(stderr, " %X%X%X", p->m->pal[i][1], p->m->pal[i][0], p->m->pal[i][2]); fprintf(stderr, "\n");
     }
-    fprintf(stderr, "imr=%02X/%02X isr=%02X/%02X opna: ta=%d tb=%d ena=%d enb=%d reg27=%02X  status=%02X a460=%02X\n", p->m->pic[0].imr, p->m->pic[1].imr, p->m->pic[0].isr, p->m->pic[1].isr,
+    fprintf(stderr, "irr=%02X/%02X imr=%02X/%02X isr=%02X/%02X opna: ta=%d tb=%d ena=%d enb=%d reg27=%02X  status=%02X a460=%02X\n", p->m->pic[0].irr, p->m->pic[1].irr, p->m->pic[0].imr, p->m->pic[1].imr, p->m->pic[0].isr, p->m->pic[1].isr,
         p->m->opna.timer_a_run, p->m->opna.timer_b_run, p->m->opna.irq_enable_a, p->m->opna.irq_enable_b, p->m->opna.reg[0][0x27], p->m->opna.status, p->m->opna.reg[1][0xFE]);
     for (int v = 0; v < 256; v++) { uint16_t sg = p->m->ram[v*4+2]|(p->m->ram[v*4+3]<<8); if (sg != 0xF000) fprintf(stderr, "[vec %02X=%04X:%04X] ", v, sg, p->m->ram[v*4]|(p->m->ram[v*4+1]<<8)); }
     fprintf(stderr, "\n");
@@ -152,9 +161,31 @@ int main(int argc, char** argv) {
     { extern unsigned g_opna_hist[2][256]; fprintf(stderr, "hist:"); for (int pt = 0; pt < 2; pt++) for (int a = 0; a < 256; a++) if (g_opna_hist[pt][a]) fprintf(stderr, " %d:%02X=%u", pt, a, g_opna_hist[pt][a]); fprintf(stderr, "\n"); }
     if (getenv("DUMPMEM")) { unsigned sg, off, n; sscanf(getenv("DUMPMEM"), "%x:%x:%x", &sg, &off, &n); for (unsigned i = 0; i < n; i++) { if (i % 32 == 0) fprintf(stderr, "\n%04X:%04X ", sg, off + i); fprintf(stderr, "%02X ", p->m->ram[((sg << 4) + off + i) & 0xFFFFF]); } fprintf(stderr, "\n"); }
     { extern unsigned* g_prof; if (g_prof) { for (int i = 0; i < 65536; i++) if (g_prof[i]) fprintf(stderr, "%04X:%u ", i, g_prof[i]); fprintf(stderr, "\n"); } }
+    if (getenv("FDLIST") && floppy::image()) {   // フロッピーの各トラックの ID と状態
+        FloppyImage* im = floppy::image();
+        int lim = atoi(getenv("FDLIST")); if (lim <= 0) lim = im->cylinders * 2;
+        fprintf(stderr, "[fdlist] %s media=%d cyl=%d lsec=%dx%dx%d\n", im->format.c_str(), im->media, im->cylinders, im->lsec_size, im->lsec_spt, im->lsec_heads);
+        for (int t = 0; t < lim && t < FloppyImage::MAX_TRACKS; t++) {
+            FdTrack* tr = im->track(t / 2, t & 1);
+            if (!tr) continue;
+            fprintf(stderr, "T%03d:", t);
+            for (auto& x : tr->secs) {
+                unsigned sum = 0; for (auto b : x.data) sum += b;
+                fprintf(stderr, " %02X%02X%02X%02X", x.c, x.h, x.r, x.n);
+                if (x.status) fprintf(stderr, "/%02X", x.status);
+                if (x.deleted) fprintf(stderr, "d");
+                if (x.copies > 1) fprintf(stderr, "x%d", x.copies);
+                fprintf(stderr, "(%zu,%04X)", x.data.size(), sum & 0xFFFF);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
+    if (getenv("FDSAVE") && floppy::image()) { std::string e; bool ok = floppy::image()->save_d88(getenv("FDSAVE"), &e); fprintf(stderr, "[fdsave] %s %s\n", ok ? "ok" : "NG", e.c_str()); }
     if (getenv("DUMPBIN")) { unsigned sg; char fn[256]; sscanf(getenv("DUMPBIN"), "%x:%255s", &sg, fn); FILE* o = fopen(fn, "wb"); fwrite(&p->m->ram[sg << 4], 1, 65536, o); fclose(o); }
     double secs = (double)(clock() - c0) / CLOCKS_PER_SEC;
-    fprintf(stderr, "cpu at %04X:%04X halted=%d\n", p->m->cpu.sr[CS_], p->m->cpu.ip, p->m->cpu.halted);
+    fprintf(stderr, "cpu at %04X:%04X halted=%d AX=%04X SS:SP=%04X:%04X stack:", p->m->cpu.sr[CS_], p->m->cpu.ip, p->m->cpu.halted, (unsigned)(p->m->cpu.r[0] & 0xFFFF), p->m->cpu.sr[SS_], (unsigned)(p->m->cpu.r[4] & 0xFFFF));
+    for (int i = 0; i < 12; i++) fprintf(stderr, " %04X", p->m->ram[((p->m->cpu.sr[SS_] << 4) + ((p->m->cpu.r[4] + i * 2) & 0xFFFF)) & 0xFFFFF] | (p->m->ram[((p->m->cpu.sr[SS_] << 4) + ((p->m->cpu.r[4] + i * 2 + 1) & 0xFFFF)) & 0xFFFFF] << 8));
+    fprintf(stderr, "\n");
     fprintf(stderr, "frames=%d cpu=%.2fs (%.1f fps) quit=%d cycles=%lld\n", frames, secs, frames / secs, p->m->quit, (long long)p->m->cpu.cycles);
     if (!wav.empty()) {
         FILE* o = fopen(wav.c_str(), "wb");

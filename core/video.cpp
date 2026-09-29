@@ -21,7 +21,7 @@ void video_render(Machine* m, uint32_t* out) {
     } else {
         static const int lo_idx[4] = {3, 1, 2, 0}, hi_idx[4] = {7, 5, 6, 4};
         uint8_t dp[8];
-        for (int k = 0; k < 4; k++) { dp[lo_idx[k]] = m->degpal[k] & 7; dp[hi_idx[k]] = (m->degpal[k] >> 4) & 7; }
+        for (int k = 0; k < 4; k++) { dp[lo_idx[k]] = (m->degpal[k] >> 4) & 7; dp[hi_idx[k]] = m->degpal[k] & 7; }   // 上位 4bit が #0-3、下位が #4-7
         for (int i = 0; i < 16; i++) {
             uint8_t v = dp[i & 7];
             pal[i] = rgb4((v & 4) ? 15 : 0, (v & 2) ? 15 : 0, (v & 1) ? 15 : 0);
@@ -34,7 +34,7 @@ void video_render(Machine* m, uint32_t* out) {
     uint32_t sad1 = (uint32_t)(m->gdcs.pram[0] | (m->gdcs.pram[1] << 8) | ((m->gdcs.pram[2] & 3) << 16));
     uint32_t len1 = (uint32_t)((m->gdcs.pram[2] >> 4) | ((m->gdcs.pram[3] & 0x3F) << 4));
     uint32_t sad2 = (uint32_t)(m->gdcs.pram[4] | (m->gdcs.pram[5] << 8) | ((m->gdcs.pram[6] & 3) << 16));
-    int zoom = (m->gdcs.zoom & 15) + 1;
+    int zoom = ((m->gdcs.zoom >> 4) & 15) + 1;   // ZOOM の上位 4bit が表示の倍率（下位は描画用）
     bool line200 = m->gfx_200 || zoom >= 2;
     int vlines = line200 ? 200 : 400;
     if (len1 == 0 || len1 > (uint32_t)vlines) len1 = (uint32_t)vlines;

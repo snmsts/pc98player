@@ -10,6 +10,7 @@
 // -----------------------------------------------------------------------------
 #include "machine.h"
 #include "hostfs.h"
+#include "floppy.h"
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -23,7 +24,11 @@ uint16_t bios_hle_stub(Machine* m, uint8_t n);
 
 #define ROMSEG 0xF000
 static const uint16_t DOSSEG      = 0x0080;   // DOS のデータ（0x800〜。0x600-0x7FF は PC-98 の DOS ワークエリア）
-static const uint16_t FIRST_MCB   = 0x0100;
+// 先頭 MCB の位置。実機の MS-DOS では本体・バッファ・デバイスドライバの後ろになるので
+// 0x0100 のような低い位置にはまず来ない。自分のロード位置から領域の大きさを計算する
+// ソフト（銀河英雄伝説IV EX の G4XSTART.EXE など）が破綻しないよう、少し上げておく。
+static const uint16_t FIRST_MCB_DEFAULT = 0x0200;   // INI の FirstMCB= で変更できる
+static uint16_t first_mcb_cfg(Machine* m) { int v = m->cfg.first_mcb; return (v >= 0x0100 && v <= 0x4000) ? (uint16_t)v : FIRST_MCB_DEFAULT; }
 static const uint16_t MEM_TOP     = 0xA000;   // 640KB
 
 // DOS データ領域内のオフセット（DOSSEG 基準）
@@ -36,6 +41,8 @@ static const uint16_t D_SWITCHAR  = 0x0080;
 static const uint16_t D_UPCASE    = 0x0090;   // 大文字化関数（far ret）
 static const uint16_t D_COUNTRY   = 0x00A0;
 static const uint16_t D_NAMEBUF   = 0x0100;
+static const uint16_t D_DPB       = 0x0740;   // ゲームのドライブの DPB（21h バイト、DOS 4+ 形式）
+static const uint16_t D_BLKDEV    = 0x0770;   // その DPB が指すブロック装置のヘッダ（実体は無い）
 
 static inline uint32_t lin(uint16_t s, uint16_t o) { return ((uint32_t)s << 4) + o; }
 static inline uint16_t rw(Machine* m, uint32_t a) { return mem_rw(m, a); }
@@ -95,7 +102,11 @@ static uint16_t s_psp, s_shell_psp;
 static uint16_t s_dta_seg, s_dta_off;
 static uint16_t s_retcode;
 static uint16_t s_last_err;
-static std::string s_cwd;      // ゲスト側のカレント（先頭の \ なし、大文字）
+static std::string s_cwd;      // ゲスト側のカレント（先頭の \ なし、大文字）。ゲームのドライブ
+static std::string s_fdcwd;    // フロッピーのドライブのカレント
+static char s_curdrv;          // カレントドライブ（0 = ゲームのドライブ）
+static char s_sg_drive;        // 直前に split_guest が解いたパスのドライブ
+static uint32_t s_fd_change = 0xFFFFFFFFu;
 static uint16_t s_stub_iret;    // INT 21h の戻り（IRET）の位置
 static uint16_t s_int21_off;
 static uint16_t s_shell_entry;
@@ -178,7 +189,13 @@ static bool valid83(const std::string& name) {
 }
 
 // ---- パス --------------------------------------------------------------------
+static uint16_t hdd_free_clusters(Machine* m) { return (uint16_t)(m->cfg.free_mb * 64); }
+static uint16_t hdd_total_clusters(Machine* m) { uint32_t t = (uint32_t)m->cfg.free_mb * 64 + 2048; if (t < 8192) t = 8192; if (t > 0xFFF0) t = 0xFFF0; return (uint16_t)t; }
+static char cur_drive(Machine* m) { return s_curdrv ? s_curdrv : m->cfg.drive; }
+static bool drive_valid(Machine* m, char d) { return d == m->cfg.drive || (d == floppy::drive_letter() && d); }
+static std::string& cwd_of(Machine* m, char d) { return d == m->cfg.drive ? s_cwd : s_fdcwd; }
 static const std::vector<HostDirEntry>& dir_list(const std::string& hostdir) {
+    if (s_fd_change != floppy::change_count()) { s_fd_change = floppy::change_count(); s_dircache.clear(); }
     auto it = s_dircache.find(hostdir);
     if (it != s_dircache.end()) return it->second;
     std::vector<HostDirEntry> v;
@@ -192,12 +209,20 @@ static bool split_guest(const std::string& in, std::vector<std::string>& comps, 
     // 末尾の空白を除く
     while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
     size_t p = 0;
-    if (s.size() >= 2 && s[1] == ':') p = 2;
+    char drv = cur_drive(g_m);
+    if (s.size() >= 2 && s[1] == ':') {
+        p = 2;
+        char d = s[0];
+        if (d >= 'a' && d <= 'z') d = (char)(d - 32);
+        if (d >= 'A' && d <= 'Z') drv = d;
+    }
+    s_sg_drive = drv;
+    const std::string& cwd = cwd_of(g_m, drv);
     bool abs = p < s.size() && (s[p] == '\\' || s[p] == '/');
     comps.clear();
-    if (!abs && !s_cwd.empty()) {
+    if (!abs && !cwd.empty()) {
         std::string c;
-        for (char ch : s_cwd) { if (ch == '\\') { if (!c.empty()) comps.push_back(c); c.clear(); } else c.push_back(ch); }
+        for (char ch : cwd) { if (ch == '\\') { if (!c.empty()) comps.push_back(c); c.clear(); } else c.push_back(ch); }
         if (!c.empty()) comps.push_back(c);
     }
     std::string cur;
@@ -226,8 +251,12 @@ static bool split_guest(const std::string& in, std::vector<std::string>& comps, 
     return true;
 }
 // ゲストのパスをホストのパスへ。存在しない最後の要素は大文字のまま付ける。
+static std::string drive_root(Machine* m, char d) {
+    if (d == m->cfg.drive || !d) return m->cfg.root;
+    return fatfs::root_path(d);   // フロッピー（それ以外のドライブ名は何も無い扱い）
+}
 static std::string host_of(Machine* m, const std::vector<std::string>& comps, size_t upto, bool* all_exist) {
-    std::string h = m->cfg.root;
+    std::string h = drive_root(m, s_sg_drive);
     bool ok = true;
     for (size_t i = 0; i < upto && i < comps.size(); i++) {
         const auto& lst = dir_list(h);
@@ -262,6 +291,8 @@ static std::string dev_name(const std::string& g) {
 }
 
 // ---- MCB ---------------------------------------------------------------------
+// 鎖の先頭は List of Lists の手前（RAM 上）から読む（古いステートでも正しく辿れるように）
+static uint16_t first_mcb(Machine* m) { return rw(m, lin(DOSSEG, D_LOL - 2)); }
 static inline uint8_t mcb_type(Machine* m, uint16_t s) { return m->ram[lin(s, 0)]; }
 static inline uint16_t mcb_owner(Machine* m, uint16_t s) { return rw(m, lin(s, 1)); }
 static inline uint16_t mcb_size(Machine* m, uint16_t s) { return rw(m, lin(s, 3)); }
@@ -272,7 +303,7 @@ static void mcb_name(Machine* m, uint16_t s, const std::string& n) {
     for (int i = 0; i < 8; i++) m->ram[lin(s, 8 + i)] = (uint8_t)(i < (int)n.size() ? n[i] : 0);
 }
 static void mcb_merge(Machine* m) {
-    uint16_t s = FIRST_MCB;
+    uint16_t s = first_mcb(m);
     for (int guard = 0; guard < 4096; guard++) {
         uint8_t t = mcb_type(m, s);
         if (t != 'M' && t != 'Z') return;
@@ -288,7 +319,7 @@ static void mcb_merge(Machine* m) {
 }
 static int mem_alloc(Machine* m, uint16_t paras, uint16_t owner, uint16_t* seg, uint16_t* largest) {
     mcb_merge(m);
-    uint16_t s = FIRST_MCB, best = 0, bestsz = 0;
+    uint16_t s = first_mcb(m), best = 0, bestsz = 0;
     uint16_t big = 0;
     for (int guard = 0; guard < 4096; guard++) {
         uint8_t t = mcb_type(m, s);
@@ -369,7 +400,7 @@ static int mem_resize(Machine* m, uint16_t seg, uint16_t paras, uint16_t* maxp) 
     return 8;
 }
 static void mem_free_owner(Machine* m, uint16_t psp) {
-    uint16_t s = FIRST_MCB;
+    uint16_t s = first_mcb(m);
     for (int guard = 0; guard < 4096; guard++) {
         uint8_t t = mcb_type(m, s);
         if (t != 'M' && t != 'Z') break;
@@ -572,7 +603,7 @@ static int load_program(Machine* m, const std::string& guest, const std::string&
     std::string host = guest_to_host(m, guest, &exists, &dev, &canon);
     std::vector<uint8_t> data;
     if (!exists || dev || !read_host_file(host, data)) return 2;
-    std::string full = std::string(1, m->cfg.drive) + ":\\" + canon;
+    std::string full = std::string(1, s_sg_drive ? s_sg_drive : m->cfg.drive) + ":\\" + canon;
     std::string base = canon.substr(canon.rfind('\\') == std::string::npos ? 0 : canon.rfind('\\') + 1);
     std::string mcbname = base.substr(0, base.find('.'));
 
@@ -739,7 +770,7 @@ static void fill_dta(Machine* m, const HostDirEntry& e, const std::string& gname
     ww(m, d + 2, (uint16_t)sid); ww(m, d + 4, (uint16_t)pos);
     uint8_t attr = (uint8_t)((e.is_dir ? 0x10 : 0x20) | (e.readonly ? 1 : 0));
     mem_wb(m, d + 0x15, attr);
-    ww(m, d + 0x16, e.dos_time); ww(m, d + 0x18, e.dos_date);
+    ww(m, d + 0x16, e.dos_time); ww(m, d + 0x18, machine_file_date(m, e.dos_date));
     ww(m, d + 0x1A, (uint16_t)e.size); ww(m, d + 0x1C, (uint16_t)(e.size >> 16));
     for (int i = 0; i < 13; i++) mem_wb(m, d + 0x1E + i, 0);
     for (size_t i = 0; i < gname.size() && i < 12; i++) mem_wb(m, d + 0x1E + (uint32_t)i, (uint8_t)gname[i]);
@@ -762,9 +793,24 @@ static bool find_next_in(Machine* m, int sid) {
 static void dos_find_first(Machine* m) {
     std::string spec = read_asciiz(m, DS(m), DX(m));
     uint8_t attr = (uint8_t)CX(m);
-    if (attr == 0x08) { dos_error(m, 0x12); return; }   // ボリュームラベル
     std::vector<std::string> comps;
     split_guest(spec, comps, nullptr);
+    if (attr == 0x08) {
+        // ボリュームラベル（属性が 08h だけのとき）: フロッピーのドライブなら円盤のラベルを返す（キーディスクの確認に使うゲームがある）
+        std::string lab; uint16_t ld = 0, lt = 0;
+        if (s_sg_drive && s_sg_drive == floppy::drive_letter() && fatfs::volume_label(&lab, &ld, &lt)) {
+            uint32_t d = lin(s_dta_seg, s_dta_off);
+            mem_wb(m, d + 0, 0xA5); mem_wb(m, d + 1, 0x5A);
+            ww(m, d + 2, 0xFFFF); ww(m, d + 4, 0);
+            mem_wb(m, d + 0x15, 0x08);
+            ww(m, d + 0x16, lt); ww(m, d + 0x18, machine_file_date(m, ld));
+            ww(m, d + 0x1A, 0); ww(m, d + 0x1C, 0);
+            for (int i = 0; i < 13; i++) mem_wb(m, d + 0x1E + i, 0);
+            for (size_t i = 0; i < lab.size() && i < 12; i++) mem_wb(m, d + 0x1E + (uint32_t)i, (uint8_t)lab[i]);
+            dos_ok(m); return;
+        }
+        dos_error(m, 0x12); return;
+    }
     std::string pat = comps.empty() ? "*.*" : comps.back();
     bool exists;
     std::string dir = host_of(m, comps, comps.empty() ? 0 : comps.size() - 1, &exists);
@@ -843,7 +889,7 @@ static void fcb_open(Machine* m, bool create) {
     if (!mem_rb(m, f)) mem_wb(m, f, (uint8_t)(m->cfg.drive - 'A' + 1));
     ww(m, f + 0x0C, 0); ww(m, f + 0x0E, 128);
     ww(m, f + 0x10, (uint16_t)size); ww(m, f + 0x12, (uint16_t)(size >> 16));
-    uint16_t d = 0x2821, t = 0; hostfs::get_time(h, &d, &t);
+    uint16_t d = 0x2821, t = 0; hostfs::get_time(h, &d, &t); d = machine_file_date(m, d);
     ww(m, f + 0x14, d); ww(m, f + 0x16, t);
     mem_wb(m, f + 0x18, (uint8_t)sft); mem_wb(m, f + 0x19, 'F');
     mem_wb(m, f + 0x20, 0);
@@ -932,7 +978,7 @@ static bool fcb_find(Machine* m, bool first) {
         for (int i = 0; i < 3; i++) mem_wb(m, d + 9 + i, i < (int)x.size() ? (uint8_t)x[i] : ' ');
         mem_wb(m, d + 0x0C, (uint8_t)(e.is_dir ? 0x10 : 0x20));
         for (int i = 0x0D; i < 0x16; i++) mem_wb(m, d + i, 0);
-        ww(m, d + 0x16, e.dos_time); ww(m, d + 0x18, e.dos_date);
+        ww(m, d + 0x16, e.dos_time); ww(m, d + 0x18, machine_file_date(m, e.dos_date));
         ww(m, d + 0x1A, 0);
         ww(m, d + 0x1C, (uint16_t)e.size); ww(m, d + 0x1E, (uint16_t)(e.size >> 16));
         return true;
@@ -1123,6 +1169,7 @@ static void dos_write(Machine* m) {
 static int dos_resolve_exec(Machine* m, const std::string& name, std::string* found);
 
 // ---- EXEC --------------------------------------------------------------------
+static bool run_command(Machine* m, const std::string& cmdline);
 static void dos_exec(Machine* m) {
     uint8_t al = AL(m);
     std::string name = read_asciiz(m, DS(m), DX(m));
@@ -1173,6 +1220,20 @@ static void dos_exec(Machine* m) {
         size_t sp = t.find(' ');
         std::string prog = sp == std::string::npos ? t : t.substr(0, sp);
         tail = sp == std::string::npos ? "" : t.substr(sp);
+        // 内部コマンド（COPY / MD / DEL など）は、シェルの実装でその場で実行して戻る
+        // （インストーラが COMMAND.COM /C COPY B:\*.AIC A: > NUL のように使う）
+        {
+            std::string up = upper_dbcs(prog);
+            static const char* const internal[] = {"COPY", "XCOPY", "DEL", "ERASE", "MD", "MKDIR", "RD", "RMDIR", "REN", "RENAME",
+                                                   "TYPE", "ECHO", "CD", "CHDIR", "CLS", "SET", "PATH", "DIR", "VER", "VOL", "REM", "ATTRIB"};
+            bool is_int = up.size() == 2 && up[1] == ':';
+            for (const char* k : internal) if (up == k) is_int = true;
+            if (is_int) {
+                if (m->cfg.trace) plog("[dos] COMMAND /C %s\n", t.c_str());
+                run_command(m, t);
+                s_retcode = 0; dos_ok(m); return;
+            }
+        }
         std::string found;
         if (dos_resolve_exec(m, prog, &found) != 0) { s_retcode = 1; dos_ok(m); return; }
         name = found;
@@ -1202,6 +1263,15 @@ static void dos_exec(Machine* m) {
 static void int21(Machine* m) {
     uint8_t ah = AH(m);
     Cpu* c = &m->cpu;
+    if (m->cfg.trace) {
+        // どの機能を使っているかの記録（機能ごとに最初の 4 回。44h は AL ごと）
+        static uint8_t seen[256][256];
+        uint8_t sub = (ah == 0x44 || ah == 0x33 || ah == 0x58 || ah == 0x65) ? AL(m) : 0;
+        if (seen[ah][sub] < 4 && ah != 0x3F && ah != 0x40 && ah != 0x42) {
+            seen[ah][sub]++;
+            plog("[dos] INT21 AX=%04X BX=%04X CX=%04X DX=%04X\n", AX(m), BX(m), CX(m), DX(m));
+        }
+    }
     switch (ah) {
     case 0x00: terminate(m, 0, 0, 0); return;
     case 0x01: case 0x07: case 0x08: {
@@ -1253,38 +1323,32 @@ static void int21(Machine* m) {
         }
         return; }
     case 0x0D: return;
-    case 0x0E: SETAL(m, 26); return;
-    case 0x19: SETAL(m, (uint8_t)(m->cfg.drive - 'A')); return;
+    case 0x0E: { char d = (char)('A' + DL(m)); if (drive_valid(m, d)) s_curdrv = d == m->cfg.drive ? 0 : d; SETAL(m, 26); return; }
+    case 0x19: SETAL(m, (uint8_t)(cur_drive(m) - 'A')); return;
     case 0x1A: s_dta_seg = DS(m); s_dta_off = DX(m); return;
-    case 0x1B: case 0x1C: SETAL(m, 32); SETCX(m, 1024); SETDX(m, 0x7FFF); return;
+    case 0x1B: case 0x1C: SETAL(m, 16); SETCX(m, 1024); SETDX(m, hdd_total_clusters(m)); return;
     case 0x25: { uint8_t v = AL(m); ww(m, v * 4u, DX(m)); ww(m, v * 4u + 2, DS(m)); return; }
     case 0x2A: {
-        time_t t = time(nullptr); struct tm lt;
-#ifdef _WIN32
-        localtime_s(&lt, &t);
-#else
-        localtime_r(&t, &lt);
-#endif
-        SETCX(m, (uint16_t)(lt.tm_year + 1900));
-        SETDX(m, (uint16_t)(((lt.tm_mon + 1) << 8) | lt.tm_mday));
-        SETAL(m, (uint8_t)lt.tm_wday); return; }
+        PcTime lt; machine_now(m, &lt);
+        SETCX(m, (uint16_t)lt.year);
+        SETDX(m, (uint16_t)((lt.month << 8) | lt.day));
+        SETAL(m, (uint8_t)lt.wday); return; }
     case 0x2B: SETAL(m, 0); return;
     case 0x2C: {
-        time_t t = time(nullptr); struct tm lt;
-#ifdef _WIN32
-        localtime_s(&lt, &t);
-#else
-        localtime_r(&t, &lt);
-#endif
+        PcTime lt; machine_now(m, &lt);
         uint32_t cs100 = (uint32_t)((m->ticks / (MASTER_CLOCK / 100)) % 100);
-        SETCX(m, (uint16_t)((lt.tm_hour << 8) | lt.tm_min));
-        SETDX(m, (uint16_t)((lt.tm_sec << 8) | cs100)); return; }
+        SETCX(m, (uint16_t)((lt.hour << 8) | lt.min));
+        SETDX(m, (uint16_t)((lt.sec << 8) | cs100)); return; }
     case 0x2D: SETAL(m, 0); return;
     case 0x2E: s_verify = AL(m) & 1; return;
     case 0x2F: c->sr[ES_] = s_dta_seg; SETBX(m, s_dta_off); return;
     case 0x30: SETAX(m, (uint16_t)(((m->cfg.dos_version & 0xFF) << 8) | ((m->cfg.dos_version >> 8) & 0xFF)) );
                SETBX(m, 0xFF00); SETCX(m, 0); return;
     case 0x31: terminate(m, AL(m), 3, DX(m)); return;
+    case 0x1F: case 0x32: {   // DPB の取得（ゲームのドライブだけ持っている）
+        int dr = ah == 0x1F || DL(m) == 0 ? (m->cfg.drive - 'A') : DL(m) - 1;
+        if (dr != m->cfg.drive - 'A') { SETAL(m, 0xFF); return; }
+        c->sr[DS_] = DOSSEG; SETBX(m, D_DPB); SETAL(m, 0); return; }
     case 0x33: {
         uint8_t al = AL(m);
         if (al == 0) R(m)[EDX] = (R(m)[EDX] & ~0xFFu) | s_break_flag;
@@ -1294,7 +1358,18 @@ static void int21(Machine* m) {
         return; }
     case 0x34: c->sr[ES_] = DOSSEG; SETBX(m, D_INDOS); return;
     case 0x35: { uint8_t v = AL(m); SETBX(m, rw(m, v * 4u)); c->sr[ES_] = rw(m, v * 4u + 2); return; }
-    case 0x36: SETAX(m, 16); SETBX(m, 0x3000); SETCX(m, 1024); SETDX(m, 0x7FFF); return;
+    case 0x36: {
+        char d = DL(m) ? (char)('A' + DL(m) - 1) : cur_drive(m);
+        if (!drive_valid(m, d)) { SETAX(m, 0xFFFF); return; }
+        if (d != m->cfg.drive) {
+            uint32_t spc, bps, fr, tot;
+            if (!fatfs::free_space(&spc, &bps, &fr, &tot)) { SETAX(m, 0xFFFF); return; }
+            SETAX(m, (uint16_t)spc); SETBX(m, (uint16_t)fr); SETCX(m, (uint16_t)bps); SETDX(m, (uint16_t)tot); return;
+        }
+        // ゲームのドライブ: 実際のディスクの大きさではなく、当時のハードディスクらしい大きさを見せる
+        // （今の何百 GB をそのまま返すと、16/32 ビットの計算があふれて「空きが足りない」になるソフトがある）。
+        // 16KB クラスタ（1024 バイト x 16）で、空きは FreeSpaceMB（既定 96MB）、全体は 128MB 以上
+        SETAX(m, 16); SETBX(m, hdd_free_clusters(m)); SETCX(m, 1024); SETDX(m, hdd_total_clusters(m)); return; }
     case 0x37:
         if (AL(m) == 0) R(m)[EDX] = (R(m)[EDX] & ~0xFFu) | '/';
         SETAL(m, 0); return;
@@ -1320,7 +1395,7 @@ static void int21(Machine* m) {
         if (!ex || !hostfs::stat(h, st) || !st.is_dir) { dos_error(m, 3); return; }
         std::string s;
         for (size_t i = 0; i < comps.size(); i++) { if (i) s += "\\"; s += comps[i]; }
-        s_cwd = s;
+        cwd_of(m, s_sg_drive) = s;
         dos_ok(m); return; }
     case 0x3C: dos_open(m, read_asciiz(m, DS(m), DX(m)), 2, true, true, false); return;
     case 0x3D: dos_open(m, read_asciiz(m, DS(m), DX(m)), AL(m), false, false, false); return;
@@ -1391,7 +1466,9 @@ static void int21(Machine* m) {
         mem_wb(m, a + nh, (uint8_t)s); s_sft[s].refs++;
         dos_ok(m); return; }
     case 0x47: {
-        std::string s = s_cwd;
+        char d = DL(m) ? (char)('A' + DL(m) - 1) : cur_drive(m);
+        if (!drive_valid(m, d)) { dos_error(m, 15); return; }
+        std::string s = cwd_of(m, d);
         write_asciiz(m, DS(m), SI(m), s);
         SETAX(m, 0x0100); dos_ok(m); return; }
     case 0x48: {
@@ -1429,7 +1506,7 @@ static void int21(Machine* m) {
         Sft& f = s_sft[s];
         if (AL(m) == 0) {
             uint16_t d = 0x2821, t = 0;
-            if (f.kind == 1) hostfs::get_time(f.h, &d, &t);
+            if (f.kind == 1) { hostfs::get_time(f.h, &d, &t); d = machine_file_date(m, d); }
             SETCX(m, t); SETDX(m, d);
         } else if (f.kind == 1) hostfs::set_time(f.h, DX(m), CX(m));
         dos_ok(m); return; }
@@ -1462,7 +1539,7 @@ static void int21(Machine* m) {
         std::string n = read_asciiz(m, DS(m), SI(m));
         std::string canon;
         guest_to_host(m, n, nullptr, nullptr, &canon);
-        write_asciiz(m, ES(m), DI(m), std::string(1, m->cfg.drive) + ":\\" + canon);
+        write_asciiz(m, ES(m), DI(m), std::string(1, s_sg_drive ? s_sg_drive : m->cfg.drive) + ":\\" + canon);
         dos_ok(m); return; }
     case 0x63:
         if (AL(m) == 0) { c->sr[DS_] = DOSSEG; SETSI(m, D_DBCS); SETAL(m, 0); }
@@ -1654,7 +1731,12 @@ static bool run_command(Machine* m, const std::string& cmdline) {
     std::string arg = trim(rest);
     std::string uarg = upper_dbcs(arg);
 
-    if (cmd.size() == 2 && cmd[1] == ':') return false;                   // ドライブ変更
+    if (cmd.size() == 2 && cmd[1] == ':') {                               // ドライブ変更
+        char d = cmd[0];
+        if (drive_valid(m, d)) s_curdrv = d == m->cfg.drive ? 0 : d;
+        else shell_print(m, "Invalid drive specification");
+        return false;
+    }
     if (cmd == "REM" || cmd == "BREAK" || cmd == "VERIFY" || cmd == "PROMPT" || cmd == "TITLE" ||
         cmd == "MODE" || cmd == "KEYB" || cmd == "CHCP" || cmd == "VER" || cmd == "VOL" || cmd == "LOADFIX") {
         if (cmd == "LOADFIX" && !arg.empty()) return run_command(m, arg);
@@ -1685,23 +1767,32 @@ static bool run_command(Machine* m, const std::string& cmdline) {
         if (arg.empty()) return false;
         std::vector<std::string> comps; split_guest(arg, comps, nullptr);
         bool ex; host_of(m, comps, comps.size(), &ex);
-        if (ex) { std::string s; for (size_t i = 0; i < comps.size(); i++) { if (i) s += "\\"; s += comps[i]; } s_cwd = s; }
+        if (ex) { std::string s; for (size_t i = 0; i < comps.size(); i++) { if (i) s += "\\"; s += comps[i]; } cwd_of(m, s_sg_drive) = s; }
         return false;
     }
     if (cmd == "GOTO") {
+        // ラベルは区切り文字（空白・タブ・, ; =）までを取り出し、MS-DOS 6.x までと同じく先頭 8 文字だけで比べる。
+        // （GOTO LABEL の後ろに余計な語があっても、長いラベルの 9 文字目以降が違っても一致する）
+        auto label_token = [](std::string t) {
+            size_t a = 0;
+            while (a < t.size() && (t[a] == ' ' || t[a] == '\t' || t[a] == ':')) a++;
+            t = t.substr(a);
+            size_t e = t.find_first_of(" \t,;=");
+            if (e != std::string::npos) t = t.substr(0, e);
+            if (t.size() > 8) t = t.substr(0, 8);
+            return upper_dbcs(t);
+        };
         if (s_batch.empty()) return false;
-        std::string lbl = upper_dbcs(trim(arg));
-        if (!lbl.empty() && lbl[0] == ':') lbl.erase(0, 1);
+        std::string lbl = label_token(arg);
         BatchCtx& b = s_batch.back();
         for (size_t i = 0; i < b.lines.size(); i++) {
             std::string l = trim(b.lines[i]);
+            while (!l.empty() && l[0] == '@') l = trim(l.substr(1));
             if (!l.empty() && l[0] == ':') {
-                std::string n = upper_dbcs(trim(l.substr(1)));
-                size_t e = n.find_first_of(" \t");
-                if (e != std::string::npos) n = n.substr(0, e);
-                if (n == lbl) { b.pc = i + 1; return false; }
+                if (!lbl.empty() && label_token(l.substr(1)) == lbl) { b.pc = i + 1; return false; }
             }
         }
+        plog("[shell] ラベルが見つかりません: %s\n", lbl.c_str());
         b.pc = b.lines.size();
         return false;
     }
@@ -1990,6 +2081,14 @@ static void shell_resume(Machine* m) {
 }
 
 void shell_start(Machine* m, const std::string& cmdline) {
+    // Start=B:\INSTALL.BAT のようにドライブ付きなら、そのドライブをカレントにして始める
+    // CurrentDrive= があればそれを優先（例: フロッピーの B:\INST.EXE を、ハードディスク A: をカレントにして動かす）
+    if (cmdline.size() >= 2 && cmdline[1] == ':') {
+        char d = cmdline[0]; if (d >= 'a' && d <= 'z') d = (char)(d - 32);
+        if (drive_valid(m, d)) s_curdrv = d == m->cfg.drive ? 0 : d;
+    }
+    if (m->cfg.current_drive && drive_valid(m, m->cfg.current_drive))
+        s_curdrv = m->cfg.current_drive == m->cfg.drive ? 0 : m->cfg.current_drive;
     BatchCtx b;
     b.lines.push_back(cmdline);
     s_batch.clear();
@@ -2030,7 +2129,33 @@ void dos_hle(Machine* m, uint8_t n) {
     case HLE_INT27: terminate(m, 0, 3, (uint16_t)((DX(m) + 15) >> 4)); break;
     case HLE_INT28: break;
     case HLE_INT29: console_putc(m, AL(m)); break;
-    case HLE_INT25: case HLE_INT26: SETAX(m, 0x0802); set_cf(m, true); break;
+    case HLE_INT25: case HLE_INT26: {
+        // 絶対ディスク読み書き。フロッピーのドライブだけイメージへ（AL=ドライブ 0=A:）
+        char d = (char)('A' + AL(m));
+        FloppyImage* im = floppy::image();
+        if (!im || d != floppy::drive_letter()) { SETAX(m, 0x8002); set_cf(m, true); break; }
+        uint32_t start = DX(m), count = CX(m), buf = lin(DS(m), BX(m));
+        if (count == 0xFFFF) {   // 32bit 版: DS:BX にパケット
+            uint32_t pk = buf;
+            start = rw(m, pk) | ((uint32_t)rw(m, pk + 2) << 16);
+            count = rw(m, pk + 4);
+            buf = lin(rw(m, pk + 8), rw(m, pk + 6));
+        }
+        std::vector<uint8_t> sec((size_t)im->lsec_size);
+        bool ok = true;
+        for (uint32_t i = 0; i < count && ok; i++) {
+            uint32_t a = buf + i * (uint32_t)im->lsec_size;
+            if (n == HLE_INT25) {
+                ok = im->read_lba(start + i, sec.data());
+                for (int k = 0; k < im->lsec_size; k++) mem_wb(m, a + k, sec[k]);
+            } else {
+                for (int k = 0; k < im->lsec_size; k++) sec[k] = mem_rb(m, a + k);
+                ok = !im->wprot && im->write_lba(start + i, sec.data());
+            }
+        }
+        if (n == HLE_INT26) { fatfs::reset(); dir_invalidate(); }
+        if (ok) { SETAX(m, 0); set_cf(m, false); } else { SETAX(m, im->wprot ? 0x0300 : 0x0408); set_cf(m, true); }
+        break; }
     case HLE_INT2F: {
         uint16_t ax = AX(m);
         if (xms_int2f(m)) {}
@@ -2058,7 +2183,7 @@ void dos_init(Machine* m) {
     s_sft[3].kind = 3; s_sft[3].refs = 1; s_sft[3].name = "NUL";
     s_sft[4].kind = 2; s_sft[4].refs = 1;
     s_frames.clear(); s_search.clear(); s_batch.clear(); s_env.clear();
-    s_cwd.clear(); s_dircache.clear();
+    s_cwd.clear(); s_dircache.clear(); s_fdcwd.clear(); s_curdrv = 0; s_sg_drive = 0;
     s_retcode = 0; s_retcode_last = 0; s_shell_wait = 0; s_shell_running = false;
     s_alloc_strategy = 0;
 
@@ -2068,11 +2193,12 @@ void dos_init(Machine* m) {
     static const uint8_t dbcs[] = {0x81, 0x9F, 0xE0, 0xFC, 0, 0};
     ww(m, lin(DOSSEG, D_DBCS - 2), 6);
     for (int i = 0; i < 6; i++) r[lin(DOSSEG, D_DBCS) + i] = dbcs[i];
+    const uint16_t FIRST_MCB = first_mcb_cfg(m);
     ww(m, lin(DOSSEG, D_LOL - 2), FIRST_MCB);
     {
         // List of Lists の主な項目
         uint32_t L = lin(DOSSEG, D_LOL);
-        ww(m, L + 0x00, 0xFFFF); ww(m, L + 0x02, 0xFFFF);            // DPB（無し）
+        ww(m, L + 0x00, D_DPB);  ww(m, L + 0x02, DOSSEG);            // DPB（ゲームのドライブ 1 つ）
         ww(m, L + 0x04, D_SFT);  ww(m, L + 0x06, DOSSEG);            // SFT
         ww(m, L + 0x08, 0xFFFF); ww(m, L + 0x0A, 0xFFFF);            // CLOCK$
         ww(m, L + 0x0C, 0xFFFF); ww(m, L + 0x0E, 0xFFFF);            // CON
@@ -2090,8 +2216,32 @@ void dos_init(Machine* m) {
         uint32_t S = lin(DOSSEG, D_SFT);
         ww(m, S + 0, 0xFFFF); ww(m, S + 2, 0xFFFF); ww(m, S + 4, SFT_GUEST_N);
     }
+    {
+        // ゲームのドライブの DPB。ファイルの読み書きは HLE なので中身は形だけだが、
+        // LoL から DPB の鎖を辿るソフト（ディスクキャッシュ MACACHE など）が迷わないように、
+        // INT 21h 36h と同じ値（1024 バイト/セクタ、16 セクタ/クラスタ）で終端つきの鎖を作る。
+        uint32_t D = lin(DOSSEG, D_DPB);
+        r[D + 0x00] = (uint8_t)(m->cfg.drive - 'A'); r[D + 0x01] = 0;
+        ww(m, D + 0x02, 1024); r[D + 0x04] = 15; r[D + 0x05] = 4;
+        ww(m, D + 0x06, 1); r[D + 0x08] = 2; ww(m, D + 0x09, 512);
+        ww(m, D + 0x0B, 0x40); ww(m, D + 0x0D, (uint16_t)(hdd_total_clusters(m) + 1)); ww(m, D + 0x0F, 0x20); ww(m, D + 0x11, 0x3F);
+        ww(m, D + 0x13, D_BLKDEV); ww(m, D + 0x15, DOSSEG);
+        r[D + 0x17] = 0xF8; r[D + 0x18] = 0;
+        ww(m, D + 0x19, 0xFFFF); ww(m, D + 0x1B, 0xFFFF);            // 次の DPB（無し）
+        ww(m, D + 0x1D, 0xFFFF); ww(m, D + 0x1F, hdd_free_clusters(m));
+        uint32_t B = lin(DOSSEG, D_BLKDEV);
+        ww(m, B + 0, 0xFFFF); ww(m, B + 2, 0xFFFF); ww(m, B + 4, 0x0800);
+        ww(m, B + 6, D_BLKDEV + 0x12); ww(m, B + 8, D_BLKDEV + 0x12); r[B + 0x0A] = 1;
+        r[B + 0x12] = 0xCB;                                           // 戦略/割込みルーチン = RETF
+    }
     r[lin(DOSSEG, D_UPCASE)] = 0xCB;   // RETF
     r[lin(DOSSEG, D_SWITCHAR)] = '/';
+    // PC-98 の MS-DOS のワークエリア 0060:006Ch: ドライブ A:〜P: の DA/UA。
+    // ゲームのドライブはハードディスク（80h）、フロッピーのドライブは 1MB FDD のユニット 0（90h）。
+    // キーディスクを探すゲーム（ファルコムの英雄伝説など）はこの表でフロッピーのドライブを見つける。
+    for (int i = 0; i < 16; i++) r[0x66C + i] = 0;
+    if (m->cfg.drive >= 'A' && m->cfg.drive <= 'P') r[0x66C + (m->cfg.drive - 'A')] = 0x80;
+    if (floppy::drive_letter() >= 'A' && floppy::drive_letter() <= 'P') r[0x66C + (floppy::drive_letter() - 'A')] = 0x90;
 
     // 割込みベクタ
     uint8_t code21[3] = {0xF1, HLE_INT21, 0xCF};
@@ -2103,6 +2253,8 @@ void dos_init(Machine* m) {
     bios_hook_vec(m, 0x20, HLE_INT20);
     bios_hook_vec(m, 0x25, HLE_INT25);
     bios_hook_vec(m, 0x26, HLE_INT26);
+    // INT 25h/26h は元のフラグをスタックに残して戻る（呼んだ側が POPF する）ので IRET ではなく RETF
+    for (int v = 0x25; v <= 0x26; v++) r[lin(ROMSEG, (uint16_t)(rw(m, v * 4u) + 2))] = 0xCB;
     bios_hook_vec(m, 0x27, HLE_INT27);
     bios_hook_vec(m, 0x28, HLE_INT28);
     bios_hook_vec(m, 0x29, HLE_INT29);
@@ -2166,6 +2318,11 @@ void dos_init(Machine* m) {
 void dos_state_save(Machine* m, StateW& w) {
     (void)m;
     w.tag("DOS ");
+    // フロッピー（開いているファイルを開き直す前に入れ直せるよう先頭に置く）
+    w.tag("DRV1");
+    w.pod(s_curdrv); w.str(s_fdcwd);
+    { char fl = floppy::drive_letter(); w.pod(fl); }
+    w.str(floppy::image() ? floppy::image()->path : std::string());
     w.u32((uint32_t)s_sft.size());
     for (auto& f : s_sft) {
         w.pod(f.refs); w.pod(f.kind); w.str(f.host); w.str(f.name); w.pod(f.mode); w.pod(f.owner);
@@ -2192,6 +2349,19 @@ void dos_state_save(Machine* m, StateW& w) {
 void dos_state_load(Machine* m, StateR& r) {
     (void)m;
     r.tag("DOS ");
+    if (r.peek_tag("DRV1")) {
+        r.tag("DRV1");
+        r.pod(s_curdrv); s_fdcwd = r.str();
+        char fl = 0; r.pod(fl);
+        std::string fp = r.str();
+        floppy::set_drive_letter(fl);
+        FloppyImage* cur = floppy::image();
+        if (fp.empty()) { if (cur) floppy::eject(); }
+        else if (!cur || cur->path != fp) {
+            std::string e;
+            if (!floppy::insert(fp, &e)) plog("[state] フロッピーを入れ直せません: %s (%s)\n", fp.c_str(), e.c_str());
+        }
+    } else { s_curdrv = 0; s_fdcwd.clear(); }
     // 今開いているホストのファイルを閉じる
     for (auto& f : s_sft) if (f.kind == 1 && f.h) hostfs::close(f.h);
     s_sft.clear();

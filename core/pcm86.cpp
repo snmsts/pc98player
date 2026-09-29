@@ -71,6 +71,9 @@ uint8_t pcm86_in(Machine* m, uint16_t port) {
         uint8_t v = 0;
         if (p.count >= 0x8000) v |= 0x80;          // FIFO 満杯
         if (p.count == 0) v |= 0x40;               // FIFO 空
+        // bit0: LR クロック。標本化周波数で L/R が切り替わるたびに反転する。
+        // これの変化を待って 1 標本ずつ書くドライバがある（R-FORCE の PCML など）
+        if (((m->ticks * k_rates[p.ctrl & 7] * 2) / MASTER_CLOCK) & 1) v |= 0x01;
         return v; }
     case 0xA468: return (uint8_t)((p.ctrl & ~0x10) | (p.irqflag ? 0x10 : 0));
     case 0xA46A: return p.dactrl;

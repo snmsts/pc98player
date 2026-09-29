@@ -36,6 +36,50 @@ void plog(const char* fmt, ...) {
     va_end(ap);
 }
 
+// ---- 日付 --------------------------------------------------------------------
+#include <time.h>
+static int days_from_civil(int y, int m, int d) {           // 1970-01-01 からの日数
+    y -= m <= 2; int era = (y >= 0 ? y : y - 399) / 400; int yoe = y - era * 400;
+    int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1; int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+static void civil_from_days(int z, int* y, int* m, int* d) {
+    z += 719468; int era = (z >= 0 ? z : z - 146096) / 146097; int doe = z - era * 146097;
+    int yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; int yy = yoe + era * 400;
+    int doy = doe - (365 * yoe + yoe / 4 - yoe / 100); int mp = (5 * doy + 2) / 153;
+    *d = doy - (153 * mp + 2) / 5 + 1; *m = mp + (mp < 10 ? 3 : -9); *y = yy + (*m <= 2);
+}
+static int s_start_days = -1;   // 起動した日（実際の日付）
+void machine_now(Machine* m, PcTime* o) {
+    time_t now = time(nullptr); struct tm lt;
+#ifdef _WIN32
+    localtime_s(&lt, &now);
+#else
+    localtime_r(&now, &lt);
+#endif
+    int y = lt.tm_year + 1900, mo = lt.tm_mon + 1, d = lt.tm_mday;
+    int today = days_from_civil(y, mo, d);
+    if (s_start_days < 0) s_start_days = today;
+    if (m && m->cfg.fake_date > 0) {
+        int fy = m->cfg.fake_date / 10000, fm = (m->cfg.fake_date / 100) % 100, fd = m->cfg.fake_date % 100;
+        civil_from_days(days_from_civil(fy, fm, fd) + (today - s_start_days), &y, &mo, &d);
+    } else if (m && m->cfg.fake_year > 0) {
+        y = m->cfg.fake_year;
+        bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        if (mo == 2 && d == 29 && !leap) d = 28;
+    }
+    int z = days_from_civil(y, mo, d);
+    o->year = y; o->month = mo; o->day = d; o->wday = ((z % 7) + 11) % 7;   // 1970-01-01 は木曜
+    o->hour = lt.tm_hour; o->min = lt.tm_min; o->sec = lt.tm_sec;
+}
+uint16_t machine_file_date(Machine* m, uint16_t dd) {
+    if (!m || (m->cfg.fake_date <= 0 && m->cfg.fake_year <= 0)) return dd;
+    PcTime t; machine_now(m, &t);
+    uint16_t today = (uint16_t)(((t.year - 1980) << 9) | (t.month << 5) | t.day);
+    if (t.year < 1980) return 0x0021;
+    return dd > today ? today : dd;
+}
+
 // ---- PIC --------------------------------------------------------------------
 void pic_update_hint(Machine* m) {
     uint8_t p0 = m->pic[0].irr & ~m->pic[0].imr;
@@ -63,10 +107,12 @@ int pic_acknowledge(Machine* m) {
         uint8_t bit = (uint8_t)(1u << i);
         if (p0->isr & bit) {
             if (i != 7) break;            // より高い優先度が処理中
-            // スレーブ処理中: スレーブ内でより高い優先度なら受け付ける（特殊入れ子ではないので待たせる）
-            break;
+            // IR7（スレーブ）が処理中でも、PC-98 のマスタは特殊完全入れ子モード（ICW4=1Dh）なので、
+            // スレーブの中で処理中のものより優先度の高い要求は通す（下のスレーブの走査がそれを判定する）。
+            // スレーブ側だけ EOI してマスタの EOI を条件付きにするハンドラ（スレイヤーズのマウス処理など）で、
+            // マスタの IR7 が処理中のまま残っても、音源やマウスの割込みが止まらないように。
         }
-        if (!(p0->irr & bit) || (p0->imr & bit)) continue;
+        if (!(p0->irr & bit) || (p0->imr & bit)) { if (!(i == 7 && (p0->isr & bit))) continue; }
         if (i == 7) {
             Pic* p1 = &m->pic[1];
             for (int j = 0; j < 8; j++) {
@@ -103,9 +149,11 @@ static void pic_write(Machine* m, int c, int a1, uint8_t v) {
             if (v & 2) p->read_isr = v & 1;
         } else {                          // OCW2
             int cmd = v >> 5;
-            if (cmd == 1) {               // 非特定 EOI
+            // 1=非特定 EOI、5=回転つき非特定 EOI（0A0h）、3=特定 EOI、7=回転つき特定 EOI。
+            // 優先順位の回転は扱わず、EOI としてだけ働かせる（R-FORCE の PCML は 0A0h を使う）
+            if (cmd == 1 || cmd == 5) {
                 for (int i = 0; i < 8; i++) if (p->isr & (1u << i)) { p->isr &= (uint8_t)~(1u << i); break; }
-            } else if (cmd == 3) p->isr &= (uint8_t)~(1u << (v & 7));
+            } else if (cmd == 3 || cmd == 7) p->isr &= (uint8_t)~(1u << (v & 7));
         }
     } else {
         switch (p->icw_step) {
@@ -232,6 +280,7 @@ static void gdc_command(Machine* m, Gdc* g, uint8_t cmd) {
     if (cmd == 0x0C) g->display = 0;
     else if (cmd == 0x0D || cmd == 0x6B) g->display = 1;
     else if ((cmd & 0xF0) == 0x70) g->pram_ptr = cmd & 0x0F;
+    else if ((cmd & 0xE4) == 0x20) g->mode_write = cmd & 3;         // WDAT: 描き方も決まる
     else if (cmd == 0x6C || cmd == 0x68) gdc_draw_command(m, g);   // VECTE / TEXTE
     else if (cmd == 0xE0) {   // CSRR
         g->fifo.clear();
@@ -251,7 +300,10 @@ static void gdc_param(Machine* m, Gdc* g, uint8_t v) {
         else if (n == 1) g->ead = (g->ead & ~0xFF00u) | ((uint32_t)v << 8);
         else if (n == 2) { g->ead = (g->ead & 0xFFFF) | ((uint32_t)(v & 3) << 16); g->dad = v >> 4; }
     }
-    else if (c == 0x4A) { if (n == 0) g->pattern = (uint16_t)((g->pattern & 0xFF00) | v); else g->pattern = (uint16_t)((g->pattern & 0xFF) | (v << 8)); }
+    else if (c == 0x4A) {   // MASK: 1 になっているビットが描き始めの点
+        if (n == 0) g->pattern = (uint16_t)((g->pattern & 0xFF00) | v); else g->pattern = (uint16_t)((g->pattern & 0xFF) | (v << 8));
+        if (n == 1 && g->pattern) { int b = 0; while (!(g->pattern & (1 << b))) b++; g->dad = (uint8_t)b; }
+    }
     else if (c == 0x4C) { if (n < 11) g->vect[n] = v; }
     else if ((c & 0xF0) == 0x70) { g->pram[g->pram_ptr & 15] = v; g->pram_ptr++; }
     else if ((c & 0xE4) == 0x20) {
@@ -299,12 +351,21 @@ static uint8_t mouse_porta(Machine* m) {
     if (!(ms->buttons & 1)) v |= 0x80;
     if (!(ms->buttons & 2)) v |= 0x20;
     int sel = (ms->portc >> 5) & 3;
+    // HC（ポート C bit7）=1 の間は立ち上がりで保持した値、0 の間は今の移動量をそのまま読む。
+    // 読み終えたら HC を立てて数え直すドライバ（瑠璃色の雪など）と、先に HC を立てて読むドライバの両方に合う
+    int8_t lx, ly;
+    if (ms->portc & 0x80) { lx = ms->lat_x; ly = ms->lat_y; }
+    else {
+        int x = ms->acc_x, y = ms->acc_y;
+        lx = (int8_t)(x > 127 ? 127 : x < -128 ? -128 : x);
+        ly = (int8_t)(y > 127 ? 127 : y < -128 ? -128 : y);
+    }
     uint8_t nib;
     switch (sel) {
-    case 0: nib = (uint8_t)ms->lat_x & 15; break;
-    case 1: nib = ((uint8_t)ms->lat_x >> 4) & 15; break;
-    case 2: nib = (uint8_t)ms->lat_y & 15; break;
-    default: nib = ((uint8_t)ms->lat_y >> 4) & 15; break;
+    case 0: nib = (uint8_t)lx & 15; break;
+    case 1: nib = ((uint8_t)lx >> 4) & 15; break;
+    case 2: nib = (uint8_t)ly & 15; break;
+    default: nib = ((uint8_t)ly >> 4) & 15; break;
     }
     return (uint8_t)(v | nib);
 }
@@ -358,11 +419,27 @@ static void mpu_push(Machine* m, uint8_t v) {
     if (u.rcnt < sizeof(u.recv)) { u.recv[(u.rpos + u.rcnt) & 15] = v; u.rcnt++; }
     machine_raise_irq(m, m->cfg.midi_irq);
 }
+static void mpu_defaults(Mpu& u) {
+    u.tempo = 100; u.timebase = 120; u.cth_rate = 240; u.cth_on = 0; u.cth_acc = 0; u.rel_tempo = 0x40;
+    u.expect = 0; u.msg_left = 0; u.sysex = 0; u.run_status = 0;
+}
+// 「クロック・トゥ・ホスト」（FDh）の間隔（基準クロック）: 内部クロック（tempo*timebase/60 Hz）の rate/4 回ごと
+static int64_t mpu_cth_period(const Machine* m) {
+    const Mpu& u = m->mpu;
+    int tempo = u.tempo ? u.tempo : 100, tb = u.timebase ? u.timebase : 120;
+    int rate = u.cth_rate ? u.cth_rate : 240;
+    double ticks = rate / 4.0; if (ticks < 1) ticks = 1;
+    double rel = (u.rel_tempo ? u.rel_tempo : 0x40) / 64.0;          // E1h: 相対テンポ
+    double speed = (m->cfg.midi_speed > 0 ? m->cfg.midi_speed : 100) / 100.0;   // INI の MidiSpeedFix
+    int64_t p = (int64_t)((double)MASTER_CLOCK * 60.0 / ((double)tempo * tb * rel * speed) * ticks);
+    return p < 1 ? 1 : p;
+}
 static void mpu_command(Machine* m, uint8_t v) {
     Mpu& u = m->mpu;
     if (v == 0xFF) {                         // リセット
         bool was_uart = u.uart;
         u.uart = 0; u.pending_cmd = 0;
+        mpu_defaults(u);
         // 全チャンネルの音を止める
         for (int ch = 0; ch < 16; ch++) { m->midi_out.push_back((uint8_t)(0xB0 | ch)); m->midi_out.push_back(0x7B); m->midi_out.push_back(0); }
         if (!was_uart) mpu_push(m, 0xFE);
@@ -373,8 +450,50 @@ static void mpu_command(Machine* m, uint8_t v) {
     mpu_push(m, 0xFE);
     if (v == 0xAC) mpu_push(m, 0x15);        // 版数 1.5
     else if (v == 0xAD) mpu_push(m, 0x01);
-    else if (v == 0xAF) mpu_push(m, 100);    // テンポ
-    else if (v >= 0xD0 && v <= 0xDF) u.pending_cmd = v;
+    else if (v == 0xAF) mpu_push(m, u.tempo);
+    else if (v >= 0xD0 && v <= 0xD7) { u.pending_cmd = v; u.msg_left = 0xFF; }   // 次に MIDI メッセージが 1 つ来る
+    else if (v == 0xDF) { u.pending_cmd = v; u.sysex = 1; }
+    else if (v >= 0xE0 && v <= 0xEF) u.expect = v;                                // 値が 1 バイト続く
+    else if (v >= 0xC2 && v <= 0xC8) { static const uint8_t tb[7] = {48, 72, 96, 120, 144, 168, 192}; u.timebase = tb[v - 0xC2]; }
+    else if (v == 0x95) { if (!u.cth_on) { u.cth_on = 1; u.cth_acc = MASTER_CLOCK / 1000; } }   // 最初の FDh はすぐ
+    else if (v == 0x94) u.cth_on = 0;
+}
+// データポートへの書き込み（UART モードはそのまま MIDI、インテリジェントモードは文脈で振り分け）
+static void mpu_data(Machine* m, uint8_t v) {
+    Mpu& u = m->mpu;
+    if (u.uart) { m->midi_out.push_back(v); return; }
+    if (u.expect) {
+        if (u.expect == 0xE0) { u.tempo = v ? v : 1; u.rel_tempo = 0x40; }   // テンポ設定で相対テンポは等倍に戻る
+        else if (u.expect == 0xE1) u.rel_tempo = v ? v : 1;
+        else if (u.expect == 0xE7) u.cth_rate = v;
+        u.expect = 0; return;
+    }
+    if (u.sysex) { m->midi_out.push_back(v); if (v == 0xF7) { u.sysex = 0; u.pending_cmd = 0; } return; }
+    if (u.msg_left) {
+        if (u.msg_left == 0xFF) {                   // 1 バイト目: ステータスか、ランニングステータスのデータ
+            uint8_t st = v;
+            int total;
+            if (v & 0x80) { u.run_status = v; m->midi_out.push_back(v); st = v; total = ((st & 0xE0) == 0xC0) ? 1 : 2; }
+            else {
+                st = u.run_status; if (!st) { u.msg_left = 0; return; }
+                m->midi_out.push_back(st); m->midi_out.push_back(v);
+                total = ((st & 0xE0) == 0xC0) ? 0 : 1;
+            }
+            u.msg_left = (uint8_t)total;
+            if (!u.msg_left) u.pending_cmd = 0;
+            return;
+        }
+        m->midi_out.push_back(v);
+        if (--u.msg_left == 0) u.pending_cmd = 0;
+        return;
+    }
+    // それ以外（トラックデータ等）は MIDI には送らない
+}
+void mpu_advance(Machine* m, uint32_t t) {
+    Mpu& u = m->mpu;
+    if (!m->cfg.midi || u.uart || !u.cth_on) return;
+    u.cth_acc -= t;
+    while (u.cth_acc <= 0) { u.cth_acc += mpu_cth_period(m); mpu_push(m, 0xFD); }
 }
 static uint8_t mpu_read_data(Machine* m) {
     Mpu& u = m->mpu;
@@ -489,6 +608,7 @@ static void sysport_c_write(Machine* m, uint8_t v) {
 int g_trace_port_lo = -1, g_trace_port_hi = -1;
 static unsigned s_port_log = 0;
 uint8_t io_in8_(Machine* m, uint16_t port);
+static bool unknown_io_log(Machine* m, uint16_t port);
 uint8_t io_in8(Machine* m, uint16_t port) {
     uint8_t v = io_in8_(m, port);
     if (port >= g_trace_port_lo && port <= g_trace_port_hi && s_port_log++ < 3000) plog("[in ] %04X -> %02X @%04X:%04X\n", port, v, m->cpu.op_cs, m->cpu.op_ip);
@@ -544,10 +664,18 @@ uint8_t io_in8_(Machine* m, uint16_t port) {
         case 0xA466: case 0xA468: case 0xA46A: case 0xA46C: return is26 ? 0xFF : pcm86_in(m, port);
         }
     }
-    if (m->unknown_io < 64) { m->unknown_io++; if (m->cfg.trace) plog("[io] in  %04X\n", port); }
+    if (unknown_io_log(m, port)) plog("[io] in  %04X\n", port);
     return 0xFF;
 }
 
+// 知らないポートの記録: ポートごとに最初の 8 回まで（合計 2000 行まで）。
+// 同じポートを何十回も読むソフトがあっても、後から来る別のポートが埋もれないように。
+static bool unknown_io_log(Machine* m, uint16_t port) {
+    static uint8_t per_port[65536];
+    if (!m->cfg.trace || m->unknown_io >= 2000 || per_port[port] >= 8) return false;
+    per_port[port]++; m->unknown_io++;
+    return true;
+}
 void io_out8(Machine* m, uint16_t port, uint8_t v) {
     if (port >= g_trace_port_lo && port <= g_trace_port_hi && s_port_log++ < 3000) plog("[out] %04X <- %02X @%04X:%04X\n", port, v, m->cpu.op_cs, m->cpu.op_ip);
     switch (port) {
@@ -615,7 +743,7 @@ void io_out8(Machine* m, uint16_t port, uint8_t v) {
     case 0xF0: return;                      // CPU リセット（無視）
     }
     if (port >= 0x4A0 && port <= 0x4AF) { egc_out(m, port, v); return; }
-    if (m->cfg.midi && port == 0xE0D0) { m->midi_out.push_back(v); return; }
+    if (m->cfg.midi && port == 0xE0D0) { mpu_data(m, v); return; }
     if (m->cfg.midi && port == 0xE0D2) { mpu_command(m, v); return; }
     if (m->cfg.sound_board) {
         bool is26 = m->cfg.sound_board == 26;
@@ -628,14 +756,16 @@ void io_out8(Machine* m, uint16_t port, uint8_t v) {
         case 0xA466: case 0xA468: case 0xA46A: case 0xA46C: if (!is26) pcm86_out(m, port, v); return;
         }
     }
-    if (m->unknown_io < 64) { m->unknown_io++; if (m->cfg.trace) plog("[io] out %04X,%02X\n", port, v); }
+    if (unknown_io_log(m, port)) plog("[io] out %04X,%02X\n", port, v);
 }
 
 uint16_t io_in16(Machine* m, uint16_t port) {
     return (uint16_t)(io_in8(m, port) | (io_in8(m, (uint16_t)(port + 1)) << 8));
 }
 void io_out16(Machine* m, uint16_t port, uint16_t v) {
-    if (port >= 0x4A0 && port <= 0x4AF) { egc_out16(m, port, v); return; }
+    if (port >= 0x4A0 && port <= 0x4AF) {
+        if (port >= g_trace_port_lo && port <= g_trace_port_hi && s_port_log++ < 3000) plog("[out] %04X <- %04X (w) @%04X:%04X\n", port, v, m->cpu.op_cs, m->cpu.op_ip);
+        egc_out16(m, port, v); return; }
     io_out8(m, port, (uint8_t)v);
     io_out8(m, (uint16_t)(port + 1), (uint8_t)(v >> 8));
 }
@@ -697,6 +827,8 @@ static void advance(Machine* m, uint32_t t) {
 
     // PCM86
     if (m->pcm86.ctrl & 0x80) pcm86_advance(m, t);
+    // MIDI（MPU のクロック・トゥ・ホスト）
+    if (m->mpu.cth_on) mpu_advance(m, t);
 
     // OPNA タイマ
     if (m->opna.timer_a_run) {
@@ -798,6 +930,7 @@ Machine* machine_create(const Config& cfg) {
     }
     egc_reset(m);
     pcm86_reset(m);
+    mpu_defaults(m->mpu);
     fontrom_reset_gaiji();
     bios_init(m);
     dos_init(m);
@@ -850,7 +983,7 @@ void machine_state_save(Machine* m, StateW& w) {
     w.pod(m->cyc_acc);
     fontrom_state_save(w);
     egc_state_save(w);
-    w.tag("MPU "); w.pod(m->mpu);
+    w.tag("MPU2"); w.pod(m->mpu);
     pcm86_state_save(m, w);
 }
 
@@ -879,7 +1012,11 @@ void machine_state_load(Machine* m, StateR& r) {
     r.pod(m->cyc_acc);
     fontrom_state_load(r);
     egc_state_load(r);
-    if (r.peek_tag("MPU ")) { r.tag("MPU "); r.pod(m->mpu); } else memset(&m->mpu, 0, sizeof(m->mpu));
+    if (r.peek_tag("MPU2")) { r.tag("MPU2"); r.pod(m->mpu); }
+    else {
+        memset(&m->mpu, 0, sizeof(m->mpu)); mpu_defaults(m->mpu);
+        if (r.peek_tag("MPU ")) { r.tag("MPU "); uint8_t old[21]; r.bytes(old, sizeof(old)); }   // 旧形式は読み飛ばす
+    }
     m->midi_out.clear();
     pcm86_state_load(m, r);
     // 派生状態の作り直し

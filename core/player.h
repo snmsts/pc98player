@@ -40,6 +40,7 @@ struct SlotInfo {
 std::string state_slot_path(const std::string& root, int slot);
 bool state_slot_info(const std::string& root, int slot, SlotInfo* info);
 
+std::string floppy_host_path(const std::string& root, const std::string& name);
 bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSettings* ps);
 
 class OpnaRenderer;
@@ -60,6 +61,7 @@ struct Player {
     std::vector<uint8_t> midi_msg;
     void midi_feed(uint8_t b);
     bool init(const PlayerSettings& s, std::string* err);
+    std::string floppy_error;       // 起動時にフロッピーを入れられなかった理由（ホストが知らせる）
     // ステートセーブ（スロット 0..STATE_SLOTS-1）。ファイルはゲームのフォルダの PC98PLAYER.SAV\ に置く
     bool save_state(int slot, std::string* err);
     bool load_state(int slot, std::string* err);

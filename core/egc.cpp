@@ -201,9 +201,13 @@ void egc_write(Machine* m, uint32_t off, int w, uint16_t value) {
         uint16_t sel = g.r.fgbg & 0x6000;
         if (w == 16) use_shifter(true);
         else if (sel != 0x2000 && sel != 0x4000) use_shifter(cpu_src);
+        // 4A2h bit13-14 = 00 のときはパターンレジスタ。ただし CPU が転送元で 4A4h bit8-9 = 01
+        // （読み出しで更新）のときは、シフタを通った CPU のデータを書く（痕のオープニングの雲:
+        // 主記憶の 1 プレーンぶんの絵を、ずらしながら VRAM へ送る）
         for (int p = 0; p < 4; p++)
             data[p] = sel == 0x2000 ? (uint16_t)(plane_color(g.r.bg, p) & lm)
                     : sel == 0x4000 ? (uint16_t)(plane_color(g.r.fg, p) & lm)
+                    : (cpu_src && (g.r.ope & 0x0300) == 0x0100) ? lane_get(g.out[p], w, half)
                     : lane_get(g.pat[p], w, half);
         break; }
     default:                                               // CPU のデータをそのまま書く
@@ -299,6 +303,3 @@ void egc_state_load(StateR& r) {
     }
     r.tag("EGC2"); r.pod(g);
 }
-
-// ---- GDC の描画コマンド（未実装）------------------------------------------------
-void gdc_draw_command(Machine* m, Gdc* g2) { if (m->cfg.trace) plog("[gdc] 描画コマンド %02X\n", g2->cmd); }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //  player.cpp -- 1 フレーム進めて、画面と音を取り出す
 #include "player.h"
+#include "floppy.h"
 #include "opna_renderer.h"
 #include "hostfs.h"
 #include <string.h>
@@ -89,11 +90,13 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
     ps->scale = I("SCALE", 2);
     if (ps->scale < 1) ps->scale = 1;
     if (ps->scale > 8) ps->scale = 8;
-    ps->volume = I("VOLUME", 100);
-    ps->fm_volume = I("FMVOLUME", 100);
-    ps->ssg_volume = I("SSGVOLUME", 100);
-    ps->beep_volume = I("BEEPVOLUME", 50);
-    ps->pcm_volume = I("PCMVOLUME", 100);
+    // 音量は 0〜1000%。100% を超えたぶんは出口のリミッタが割れを抑える
+    auto V = [&](const char* k, int d) { int v = I(k, d); return v < 0 ? 0 : v > 1000 ? 1000 : v; };
+    ps->volume = V("VOLUME", 100);
+    ps->fm_volume = V("FMVOLUME", 100);
+    ps->ssg_volume = V("SSGVOLUME", 100);
+    ps->beep_volume = V("BEEPVOLUME", 50);
+    ps->pcm_volume = V("PCMVOLUME", 100);
     ps->fullscreen = I("FULLSCREEN", 0) != 0;
     ps->smooth = I("SMOOTH", 0) != 0;
     ps->exit_on_end = I("EXITONEND", 1) != 0;
@@ -102,9 +105,45 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
     ps->rhythm_rom = G("RHYTHMROM", "");
     ps->jis78 = I("KANJIJIS", 78) != 83;
     ps->sample_rate = I("SAMPLERATE", 44100);
+    {
+        std::string fm = G("FIRSTMCB", "");   // 16 進（例: 0200）
+        if (!fm.empty()) ps->cfg.first_mcb = (int)strtol(fm.c_str(), nullptr, 16);
+    }
+    {
+        // 2000 年問題対策: FakeYear=1998（年だけ置き換え） / FakeDate=1999/12/31（起動日をこの日付にして進める）
+        int fy = I("FAKEYEAR", 0);
+        if (fy >= 1980 && fy <= 2099) ps->cfg.fake_year = fy;
+        std::string fd = G("FAKEDATE", "");
+        int y = 0, mo = 0, d = 0;
+        std::string digits; for (char c : fd) if (c >= '0' && c <= '9') digits.push_back(c); else if (!digits.empty() && digits.back() != ' ') digits.push_back(' ');
+        if (sscanf(digits.c_str(), "%d %d %d", &y, &mo, &d) == 3 || (digits.size() == 8 && sscanf(digits.c_str(), "%4d%2d%2d", &y, &mo, &d) == 3)) {
+            if (y >= 1980 && y <= 2099 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) ps->cfg.fake_date = y * 10000 + mo * 100 + d;
+        }
+    }
     ps->cfg.midi = I("MIDI", 0);
     ps->cfg.midi_irq = I("MIDIIRQ", 6);
+    {   // MIDI の演奏速度の補正（%）。MPU のテンポ（クロック・トゥ・ホスト）だけを速める
+        int sp = I("MIDISPEEDFIX", 100);
+        ps->cfg.midi_speed = sp < 10 ? 10 : sp > 1000 ? 1000 : sp;
+    }
     ps->midi_device = I("MIDIDEVICE", -1);
+    ps->cfg.floppy_image = G("FLOPPYIMAGE", "");
+    floppy::set_gw_options(G("GWDRIVE", "A"), I("GWREVS", 3));   // Greaseweazle のドライブと、1 トラックを何回転読むか
+    {
+        std::string cd = G("CURRENTDRIVE", "");
+        ps->cfg.current_drive = cd.empty() ? 0 : (char)toupper((unsigned char)cd[0]);
+        if (ps->cfg.current_drive < 'A' || ps->cfg.current_drive > 'Z') ps->cfg.current_drive = 0;
+        int fm = I("FREESPACEMB", 96);
+        ps->cfg.free_mb = fm < 1 ? 1 : fm > 1000 ? 1000 : fm;
+    }
+    {
+        std::string fd = G("FLOPPYDRIVE", "B");
+        char c = fd.empty() ? 'B' : (char)toupper((unsigned char)fd[0]);
+        if (c < 'A' || c > 'Z') c = 'B';
+        // ゲームのドライブと重なったらずらす（Drive=B, FloppyDrive=A のようにフロッピーを A: にもできる）
+        if (c == ps->cfg.drive) c = (char)(c == 'Z' ? 'A' : c + 1);
+        ps->cfg.floppy_drive = c;
+    }
     ps->cfg.ems = I("EMS", 1) != 0;
     ps->cfg.ems_kb = I("EMSKB", 4096);
     if (ps->cfg.ems_kb < 16) ps->cfg.ems = false;
@@ -117,7 +156,16 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
 bool Player::init(const PlayerSettings& s, std::string* err) {
     ps = s;
     fontrom_set_jis78(ps.jis78);
+    floppy::set_drive_letter(ps.cfg.floppy_drive);   // DOS のドライブ表を作る前に決めておく
     m = machine_create(ps.cfg);
+    floppy::eject();
+    if (!ps.cfg.floppy_image.empty()) {
+        std::string e;
+        if (!floppy::insert(floppy_host_path(ps.cfg.root, ps.cfg.floppy_image), &e)) {
+            floppy_error = "フロッピーイメージを入れられません: " + ps.cfg.floppy_image + "（" + e + "）";
+            plog("[fd] %s\n", floppy_error.c_str());
+        }
+    }
     opna = new OpnaRenderer();
     opna->init(MASTER_CLOCK, ps.sample_rate);
     opna->set_balance(1.0 * ps.fm_volume / 100.0, 0.20 * ps.ssg_volume / 100.0);
@@ -174,6 +222,7 @@ void Player::midi_feed(uint8_t b) {
 void Player::run_frame(bool render_video) {
     uint64_t t0 = m->ticks;
     machine_run_frame(m);
+    floppy::idle();
     uint64_t t1 = m->ticks;
     if (!m->midi_out.empty()) { for (uint8_t b : m->midi_out) midi_feed(b); m->midi_out.clear(); }
     // 音: 区間 [t0, t1) のサンプルを作る
@@ -215,6 +264,15 @@ void Player::run_frame(bool render_video) {
             l += b; r += b;
         }
         l *= vol; r *= vol;
+        // ソフトリミッタ: 0.8 までは素通し、それを超える山は 1.0 に向けて丸める
+        // （音量を大きく上げたときにクリップして割れないように）
+        auto lim = [](float x) {
+            float a = fabsf(x);
+            if (a <= 0.8f) return x;
+            float y = 0.8f + 0.2f * tanhf((a - 0.8f) / 0.2f);
+            return x < 0 ? -y : y;
+        };
+        l = lim(l); r = lim(r);
         int li = (int)(l * 32767.0f), ri = (int)(r * 32767.0f);
         li = std::max(-32768, std::min(32767, li));
         ri = std::max(-32768, std::min(32767, ri));
@@ -366,4 +424,11 @@ bool Player::load_state(int slot, std::string* err) {
         return false;
     }
     return true;
+}
+
+// INI 等に書かれたフロッピーイメージの名前 → ホストのパス（相対ならゲームのフォルダから）
+std::string floppy_host_path(const std::string& root, const std::string& name) {
+    if (name.empty() || floppy::is_device_spec(name)) return name;   // 実機のドライブ（FDD:A, GW 等）
+    bool abs = name[0] == '\\' || name[0] == '/' || (name.size() >= 2 && name[1] == ':');
+    return abs ? name : hostfs::join(root, name);
 }
