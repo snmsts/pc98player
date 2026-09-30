@@ -306,13 +306,16 @@ static std::string fd_name() {
 }
 static std::string drive_str() { char d = floppy::drive_letter(); return std::string(1, d ? d : '-'); }
 
+enum { DLG_FOLDER = 3 };
 static void SDLCALL dialog_done(void* user, const char* const* list, int) {
-    if (!list || !list[0]) return;   // 取り消し・失敗
+    int code = (int)(intptr_t)user;
+    bool picked = list && list[0];
+    if (!picked && code != DLG_FOLDER) return;   // 取り消し・失敗（フォルダ選びだけは取り消しも知らせる）
     SDL_Event e;
     SDL_zero(e);
     e.type = g_ev_dialog;
-    e.user.code = (Sint32)(intptr_t)user;
-    e.user.data1 = new std::string(list[0]);
+    e.user.code = code;
+    e.user.data1 = picked ? new std::string(list[0]) : nullptr;
     SDL_PushEvent(&e);
 }
 static const SDL_DialogFileFilter k_fd_filters[] = {
@@ -326,7 +329,16 @@ static void fd_insert(const std::string& spec) {
     if (floppy::insert(spec, &err)) {
         show_toast(std::string(floppy::is_device_spec(spec) ? "実機のドライブをつなぎました: " : "") + drive_str() + ": にフロッピーを入れました");
         menu_close();
-    } else g_menu_note = "入れられませんでした: " + err;
+    } else if (g_menu != MENU_NONE) g_menu_note = "入れられませんでした: " + err;
+    else show_toast("入れられませんでした: " + err);
+}
+static bool is_floppy_image(const std::string& path) {
+    size_t d = path.rfind('.');
+    if (d == std::string::npos) return false;
+    std::string ext = path.substr(d + 1);
+    for (auto& c : ext) c = (char)tolower((unsigned char)c);
+    std::string list = std::string(";") + k_fd_filters[0].pattern + ";";
+    return list.find(";" + ext + ";") != std::string::npos;
 }
 static void fd_save_d88(const std::string& path) {
     FloppyImage* im = floppy::image();
@@ -515,6 +527,7 @@ static void on_menu_key(SDL_Scancode sc, bool first) {
 static void on_event(SDL_Event& e, bool& running) {
     if (e.type == g_ev_dialog) {
         std::string* path = (std::string*)e.user.data1;
+        if (!path) return;
         if (e.user.code == DLG_INSERT) fd_insert(*path);
         else if (e.user.code == DLG_SAVE_D88) fd_save_d88(*path);
         delete path;
@@ -522,6 +535,10 @@ static void on_event(SDL_Event& e, bool& running) {
     }
     switch (e.type) {
     case SDL_EVENT_QUIT: running = false; break;
+    case SDL_EVENT_DROP_FILE:   // 動いている最中に落とされたフロッピーイメージは入れる
+        if (e.drop.data && is_floppy_image(e.drop.data)) fd_insert(e.drop.data);
+        else if (e.drop.data) show_toast("フロッピーイメージではありません");
+        break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
         set_capture(false);
         release_keys();   // 離した瞬間に押しっぱなしのキーが残らないように
@@ -593,7 +610,7 @@ static std::string guess_start(const std::string& dir) {
         size_t d = n.rfind('.');
         if (d == std::string::npos) continue;
         std::string ext = n.substr(d), base = n.substr(0, d);
-        if (base == "PC98PLAYER" || base.find("INST") != std::string::npos || base == "AUTOEXEC" || base == "SETUP" || base == "CONFIG") continue;
+        if (base.compare(0, 10, "PC98PLAYER") == 0 || base.find("INST") != std::string::npos || base == "AUTOEXEC" || base == "SETUP" || base == "CONFIG") continue;
         if (ext == ".BAT") bats.push_back(n);
         else if (ext == ".EXE" || ext == ".COM") exes.push_back(n);
     }
@@ -679,6 +696,101 @@ static void set_log_env(const std::string& path) {
 #endif
 }
 
+// ---- ゲームのフォルダを決める ------------------------------------------------------
+static fs::path norm(const fs::path& p) {
+    std::error_code ec;
+    fs::path r = fs::weakly_canonical(fs::absolute(p, ec), ec);
+    return r.empty() ? p : r;
+}
+static bool has_game(const fs::path& d) {
+    std::error_code ec;
+    return fs::is_directory(d, ec) && (fs::exists(d / "PC98PLAYER.INI", ec) || !guess_start(U8(d)).empty());
+}
+// フォルダ → そのフォルダ、*.INI → その INI、ほかのファイル → それがあるフォルダ
+static void take_path(const fs::path& a, fs::path* dir, fs::path* ini) {
+    std::error_code ec;
+    if (fs::is_directory(a, ec)) { *dir = a; *ini = a / "PC98PLAYER.INI"; }
+    else if (upper(U8(a.extension())) == ".INI") { *ini = a; *dir = a.parent_path(); }
+    else { *dir = a.parent_path(); *ini = *dir / "PC98PLAYER.INI"; }
+}
+// アプリを置いた場所。macOS の .app なら、その .app があるフォルダ
+static fs::path app_dir(const fs::path& base) {
+    for (fs::path p = base; p.has_relative_path(); p = p.parent_path()) {
+        std::string n = U8(p.filename());
+        if (n.size() > 4 && upper(n.substr(n.size() - 4)) == ".APP") return p.parent_path();
+    }
+    return base;
+}
+// 最後に開いたフォルダ（フォルダを選ぶ画面の初期位置）
+static fs::path recent_file() {
+    char* pp = SDL_GetPrefPath("", "PC98PLAYER");
+    fs::path r = pp ? P(pp) / "recent.txt" : fs::path();
+    SDL_free(pp);
+    return r;
+}
+static std::string load_recent() {
+    fs::path f = recent_file();
+    if (f.empty()) return "";
+    std::ifstream i(f, std::ios::binary);
+    std::string s;
+    std::getline(i, s);
+    return s;
+}
+static void save_recent(const fs::path& dir) {
+    fs::path f = recent_file();
+    if (f.empty()) return;
+    std::ofstream o(f, std::ios::binary);
+    o << U8(dir) << "\n";
+}
+// フォルダを選ぶ画面を出して待つ（選ぶ前に .app へ落とされたものも受け付ける）
+static bool pick_folder(fs::path* out) {
+    std::string def = load_recent();
+    SDL_PropertiesID pr = SDL_CreateProperties();
+    SDL_SetStringProperty(pr, SDL_PROP_FILE_DIALOG_TITLE_STRING, "PC98PLAYER - ゲームのフォルダを選んでください");
+    if (!def.empty()) SDL_SetStringProperty(pr, SDL_PROP_FILE_DIALOG_LOCATION_STRING, def.c_str());
+    SDL_ShowFileDialogWithProperties(SDL_FILEDIALOG_OPENFOLDER, dialog_done, (void*)(intptr_t)DLG_FOLDER, pr);
+    SDL_DestroyProperties(pr);
+    SDL_Event e;
+    while (SDL_WaitEvent(&e)) {
+        if (e.type == SDL_EVENT_QUIT) return false;
+        if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) { *out = P(e.drop.data); return true; }
+        if (e.type == g_ev_dialog && e.user.code == DLG_FOLDER) {
+            std::string* s = (std::string*)e.user.data1;
+            if (!s) return false;
+            *out = P(*s);
+            delete s;
+            return true;
+        }
+    }
+    return false;
+}
+// 順に: 引数 → .app に落とされたもの → カレントフォルダ → アプリの隣 → 選ぶ画面
+static bool find_game(int argc, char** argv, fs::path* dir, fs::path* ini) {
+    std::error_code ec;
+    if (argc >= 2 && argv[1][0] != '-') { take_path(norm(P(argv[1])), dir, ini); return true; }
+#ifdef __APPLE__
+    // Finder で .app にフォルダを落として起動すると、起動直後にドロップとして届く
+    for (Uint64 until = SDL_GetTicks() + 300; SDL_GetTicks() < until;) {
+        SDL_Event e;
+        while (SDL_PollEvent(&e))
+            if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) { take_path(norm(P(e.drop.data)), dir, ini); save_recent(*dir); return true; }
+        SDL_Delay(10);
+    }
+#endif
+    const char* bp = SDL_GetBasePath();
+    fs::path base = norm(P(bp ? bp : "."));
+    fs::path cwd = norm(fs::current_path(ec));
+    if (cwd != base && has_game(cwd)) { take_path(cwd, dir, ini); return true; }
+    // 隔離（App Translocation）された .app の隣は読み取り専用の仮の場所なので使わない
+    fs::path ad = app_dir(base);
+    if (U8(ad).find("/AppTranslocation/") == std::string::npos && has_game(ad)) { take_path(ad, dir, ini); return true; }
+    fs::path picked;
+    if (!pick_folder(&picked)) return false;
+    take_path(norm(picked), dir, ini);
+    save_recent(*dir);
+    return true;
+}
+
 int main(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_APP_NAME, "PC98PLAYER");
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "512");
@@ -688,24 +800,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
+    g_ev_dialog = SDL_RegisterEvents(1);
     std::error_code ec;
-    auto norm = [&](const fs::path& p) { fs::path r = fs::weakly_canonical(fs::absolute(p, ec), ec); return r.empty() ? p : r; };
-    const char* bp = SDL_GetBasePath();
-    fs::path exe_dir = norm(P(bp ? bp : "."));
-    fs::path dir = exe_dir;
-    fs::path ini_path = dir / "PC98PLAYER.INI";
-    if (argc >= 2 && argv[1][0] != '-') {
-        // 引数: ゲームのフォルダ、または INI ファイル
-        fs::path a = norm(P(argv[1]));
-        if (fs::is_directory(a, ec)) { dir = a; ini_path = dir / "PC98PLAYER.INI"; }
-        else if (fs::exists(a, ec)) { ini_path = a; dir = a.parent_path(); }
-    } else if (argc < 2) {
-        // 引数なし: カレントフォルダに INI か起動できそうなファイルがあればそこをゲームのフォルダにする
-        fs::path cwd = norm(fs::current_path(ec));
-        if (cwd != exe_dir && (fs::exists(cwd / "PC98PLAYER.INI", ec) || !guess_start(U8(cwd)).empty())) {
-            dir = cwd; ini_path = dir / "PC98PLAYER.INI";
-        }
-    }
+    fs::path dir, ini_path;
+    if (!find_game(argc, argv, &dir, &ini_path)) { SDL_Quit(); return 0; }
     if (!fs::exists(ini_path, ec)) {
         std::string st = guess_start(U8(dir));
         write_template_ini(U8(ini_path), st);
@@ -763,7 +861,6 @@ int main(int argc, char** argv) {
     SDL_SetTextureScaleMode(g_tex, ps.smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
     SDL_SetTextureScaleMode(g_ovl, SDL_SCALEMODE_NEAREST);
     SDL_SetTextureBlendMode(g_ovl, SDL_BLENDMODE_BLEND);
-    g_ev_dialog = SDL_RegisterEvents(1);
 
     g_p = new Player();
     std::string err;
@@ -774,6 +871,7 @@ int main(int argc, char** argv) {
     update_title();
     if (!font_ok) show_toast(ferr);
     if (!g_p->floppy_error.empty()) show_toast(g_p->floppy_error);
+    if (getenv("PC98PLAYER_SHOW_RENDERER")) { g_title += std::string(" [") + SDL_GetRendererName(g_ren) + "]"; update_title(); }
 
     const double frame_sec = (double)FRAME_TICKS / MASTER_CLOCK;
     const double freq = (double)SDL_GetPerformanceFrequency();
