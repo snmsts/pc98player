@@ -23,8 +23,20 @@ static std::vector<MouseEv> mev;
 static int save_f = -1, save_slot = 0, load_f = -1, load_slot = 0;
 
 #include "../core/floppy.h"
+#include "../core/hdimage.h"
 int main(int argc, char** argv) {
-    std::vector<std::pair<int, std::string>> fdev;   // --fd フレーム:イメージ（フロッピーの入れ替え）
+    std::vector<std::pair<int, std::string>> fdev;
+    std::vector<std::pair<int, std::pair<std::string, std::string>>> cpev;   // --cpfile フレーム:元:先（ファイルを書き換える。実機のディスク交換の代わり）   // --fd フレーム:イメージ（フロッピーの入れ替え）
+    if (argc >= 4 && std::string(argv[1]) == "--hdx") {   // ハードディスクイメージの展開: --hdx イメージ 展開先
+        hdimage::Info in; std::string e;
+        if (!hdimage::probe(argv[2], &in, &e)) { fprintf(stderr, "probe NG: %s\n", e.c_str()); return 1; }
+        fprintf(stderr, "%s ss=%d spt=%d heads=%d cyls=%d parts=%zu\n", in.format.c_str(), in.ssize, in.spt, in.heads, in.cyls, in.parts.size());
+        hdimage::Result r;
+        if (!hdimage::extract(argv[2], argv[3], &r, &e)) { fprintf(stderr, "extract NG: %s\n", e.c_str()); return 1; }
+        fprintf(stderr, "files=%d dirs=%d skipped=%d errors=%d bytes=%llu\n", r.files, r.dirs, r.skipped, r.errors, (unsigned long long)r.bytes);
+        for (auto& n : r.notes) fprintf(stderr, "  %s\n", n.c_str());
+        return 0;
+    }
     if (argc < 2) { fprintf(stderr, "usage: harness gamedir [--start cmd] [--frames n] [--shot a,b] [--key f:sc[:u]] [--wav f] [--out prefix]\n"); return 1; }
     std::string dir = argv[1];
     std::string start, out = "shot", wav, ini_path;
@@ -44,6 +56,7 @@ int main(int argc, char** argv) {
         else if (a == "--load") { std::string s2 = next(); sscanf(s2.c_str(), "%d:%d", &load_f, &load_slot); }
         else if (a == "--wav") wav = next();
         else if (a == "--fd") { std::string s2 = next(); size_t c = s2.find(':'); fdev.push_back({atoi(s2.substr(0, c).c_str()), s2.substr(c + 1)}); }
+        else if (a == "--cpfile") { std::string s2 = next(); size_t c1 = s2.find(':'), c2 = s2.find(':', c1 + 1); cpev.push_back({atoi(s2.substr(0, c1).c_str()), {s2.substr(c1 + 1, c2 - c1 - 1), s2.substr(c2 + 1)}}); }
         else if (a == "--out") out = next();
         else if (a == "--mhz") mhz = atoi(next().c_str());
         else if (a == "--trace") trace = 1; else if (a == "--trace2") trace = 2;
@@ -111,6 +124,12 @@ int main(int argc, char** argv) {
             fprintf(stderr, " 40-4E:"); for (int i = 0x40; i < 0x4F; i++) fprintf(stderr, " %02X", p->m->opna.reg[0][i]);
             fprintf(stderr, " B0-B6:"); for (int i = 0xB0; i < 0xB7; i++) fprintf(stderr, " %02X", p->m->opna.reg[0][i]); fprintf(stderr, "\n"); }
         for (auto& e : mev) if (e.frame == f) machine_mouse(p->m, e.dx, e.dy, e.b);
+        for (auto& e : cpev) if (e.first == f) {
+            FILE* i = fopen(e.second.first.c_str(), "rb"); FILE* o = fopen(e.second.second.c_str(), "r+b");
+            if (i && o) { std::vector<char> b(1 << 20); size_t n; while ((n = fread(b.data(), 1, b.size(), i)) > 0) fwrite(b.data(), 1, n, o); }
+            if (i) fclose(i); if (o) fclose(o);
+            fprintf(stderr, "cpfile %s -> %s\n", e.second.first.c_str(), e.second.second.c_str());
+        }
         for (auto& e : fdev) if (e.first == f) { std::string er; fprintf(stderr, "fd insert %s: %s\n", e.second.c_str(), floppy::insert(e.second, &er) ? "ok" : er.c_str()); }
         { extern int g_trace_port_lo, g_trace_port_hi; static int saved_lo = -1, saved_hi = -1;
           if (getenv("TRACEPORT_FROM")) { int from = atoi(getenv("TRACEPORT_FROM"));

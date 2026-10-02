@@ -94,13 +94,20 @@ public:
     bool fetch(int cyl, int head, FdTrack& out) override {
         out.secs.clear(); out.diags.clear();
         err.clear();
+        if (cyl == 0 && head == 0) requery();              // 入れ替えたかもしれない: 形と書き込み禁止を取り直す
         if (cyl >= cyls || head >= heads) return false;   // 範囲外 = 何も無いトラック
         std::vector<uint8_t> buf((size_t)spt * bps);
         int64_t off = ((int64_t)cyl * heads + head) * spt * bps;
-        bool whole = read_at(off, buf.data(), (int)buf.size());
-        if (!whole && !err.empty() && err[0] == '!') {   // ディスクが無い／入れ替えた
-            err = err.substr(1);
-            return false;
+        // トラックをまとめて読む。失敗したら少し間をおいてもう一度（USB フロッピーは、変わった
+        // トラックへ移った直後の読み込みだけ失敗することがある。T98-Next + NFDMAKE で読めるのもこのため）
+        bool whole = false;
+        for (int a = 0; a < 2 && !whole; a++) {
+            err.clear();
+            whole = read_at(off, buf.data(), (int)buf.size());
+            if (!whole) {
+                plog("[fd] USB-FDD C=%02X H=%02X: トラックをまとめて読めません（%s）\n", cyl, head, err.c_str());
+                if (!err.empty() && err[0] == '!') { err = err.substr(1); return false; }   // ディスクが無い／入れ替えた
+            }
         }
         for (int r = 1; r <= spt; r++) {
             FdSector s;
@@ -108,9 +115,23 @@ public:
             s.deleted = false; s.fm = false; s.file_off = -1; s.copies = 1; s.next_copy = 0;
             s.status = 0;
             uint8_t* p = &buf[(size_t)(r - 1) * bps];
-            if (!whole) {   // 1 セクタずつ読み直す。読めないセクタはデータ CRC エラー
-                err.clear();
-                if (!read_at(off + (int64_t)(r - 1) * bps, p, bps)) { s.status = 0xB0; memset(p, 0, (size_t)bps); }
+            if (!whole) {   // 1 セクタずつ読み直す（何度か）。どうしても読めないセクタはデータ CRC エラー
+                bool ok = false;
+                int a;
+                for (a = 0; a < 5 && !ok; a++) {
+                    if (a == 2 || a == 4) {   // ヘッドを動かしてからやり直す（トラック 0 を読んで戻る）
+                        std::vector<uint8_t> t0((size_t)bps);
+                        err.clear(); read_at(0, t0.data(), bps);
+                        requery();
+                    }
+                    err.clear();
+                    ok = read_at(off + (int64_t)(r - 1) * bps, p, bps);
+                }
+                if (!ok) {
+                    plog("[fd] USB-FDD C=%02X H=%02X R=%02X: 読めません（%s）\n", cyl, head, r, err.c_str());
+                    s.status = 0xB0; memset(p, 0, (size_t)bps);
+                    s.file_off = -2;   // 実機で読めなかった印（次に使うときにもう一度読みに行く）
+                } else if (a > 1) plog("[fd] USB-FDD C=%02X H=%02X R=%02X: %d 回目で読めました\n", cyl, head, r, a);
             }
             s.data.assign(p, p + bps);
             out.secs.push_back(s);
@@ -134,6 +155,8 @@ public:
 class WinDrive : public BlockDrive {
 public:
     HANDLE h = INVALID_HANDLE_VALUE;
+    bool media_wp = false;       // ディスクが書き込み禁止
+    bool writable() const override { return can_write && !media_wp; }
     bool locked = false;
     uint8_t* abuf = nullptr;            // セクタ境界にそろえたバッファ（FILE_FLAG_NO_BUFFERING 用）
     size_t abuf_size = 0;
@@ -158,6 +181,8 @@ public:
         cyls = (int)g.Cylinders.QuadPart; heads = (int)g.TracksPerCylinder; spt = (int)g.SectorsPerTrack; bps = (int)g.BytesPerSector;
         if (cyls <= 0 || heads <= 0 || spt <= 0 || bps < 128 || bps > 4096) return false;
         set_hints();
+        // ディスクの書き込み禁止のつまみ
+        media_wp = !DeviceIoControl(h, IOCTL_DISK_IS_WRITABLE, nullptr, 0, nullptr, 0, &br, nullptr) && GetLastError() == ERROR_WRITE_PROTECT;
         return true;
     }
     bool io(int64_t off, uint8_t* buf, int len, bool wr) {
@@ -169,13 +194,13 @@ public:
         BOOL ok = wr ? WriteFile(h, abuf, (DWORD)len, &done, nullptr) : ReadFile(h, abuf, (DWORD)len, &done, nullptr);
         if (ok && done == (DWORD)len) { if (!wr) memcpy(buf, abuf, (size_t)len); return true; }
         DWORD e = GetLastError();
-        if (e == ERROR_NOT_READY || e == ERROR_NO_MEDIA_IN_DRIVE) { err = "!ディスクが入っていません"; return false; }
+        if (e == ERROR_NOT_READY || e == ERROR_NO_MEDIA_IN_DRIVE) { err = "!ディスクが入っていません（Windows のエラー " + std::to_string((unsigned long)e) + "）"; return false; }
         if (e == ERROR_MEDIA_CHANGED) {   // 入れ替えた: 形を取り直してもう一度
             if (requery()) {
                 ok = wr ? WriteFile(h, abuf, (DWORD)len, &done, nullptr) : ReadFile(h, abuf, (DWORD)len, &done, nullptr);
                 if (ok && done == (DWORD)len) { if (!wr) memcpy(buf, abuf, (size_t)len); return true; }
             }
-            err = "!ディスクが入れ替わりました"; return false;
+            err = "!ディスクが入れ替わりました（Windows のエラー " + std::to_string((unsigned long)GetLastError()) + "）"; return false;
         }
         char b[64]; snprintf(b, sizeof(b), "読み書きの失敗（Windows のエラー %lu）", (unsigned long)e);
         err = b;
@@ -221,7 +246,13 @@ class FileDrive : public BlockDrive {
 public:
     int fd = -1;
     ~FileDrive() override { if (fd >= 0) close(fd); }
+    int fail_left = -1; int64_t fail_lo = 0, fail_hi = 0;   // テスト用: PC98PLAYER_FDFAIL=始め:終わり:回数
     bool read_at(int64_t off, uint8_t* buf, int len) override {
+        if (fail_left < 0) {
+            fail_left = 0;
+            if (const char* e = getenv("PC98PLAYER_FDFAIL")) { long long a, b; int n; if (sscanf(e, "%lld:%lld:%d", &a, &b, &n) == 3) { fail_lo = a; fail_hi = b; fail_left = n; } }
+        }
+        if (fail_left > 0 && off < fail_hi && off + len > fail_lo) { fail_left--; err = "テスト用の失敗"; return false; }
         if (pread(fd, buf, (size_t)len, off) == len) return true;
         err = "読み込みの失敗"; return false;
     }

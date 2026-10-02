@@ -456,20 +456,81 @@ static void close_handle(Machine* m, uint16_t h) {
     sft_release(v);
 }
 
+// ---- キーの割り当て（INT DCh CL=0Ch/0Dh） -------------------------------------------
+//  MS-DOS はファンクションキー（F1-F10, SHIFT+F1-F10: 16 バイトずつ）と編集キー（ROLL UP・ROLL DOWN・INS・DEL・
+//  ↑・←・→・↓・HOME/CLR・HELP・SHIFT+HOME/CLR: 6 バイトずつ）に文字列を割り当て、コンソール入力で展開する。
+//  ファイラーなどは起動時に自分用の割り当てに変える（例: DFX はカーソルキーを自分の文字に変える）。
+//  ファンクションキーの 16 バイトは、先頭が FEh なら続く 5 バイトが表示名で、文字列は 6 バイト目から。
+static uint8_t s_fkey[20][16];
+static uint8_t s_ekey[11][6];
+static bool s_keytab_init = false;
+static void keytab_default() {
+    memset(s_fkey, 0, sizeof(s_fkey)); memset(s_ekey, 0, sizeof(s_ekey));
+    static const char fk[10] = {'S','T','U','V','W','E','J','P','Q','Z'};
+    for (int i = 0; i < 10; i++) { s_fkey[i][0] = 0x1B; s_fkey[i][1] = (uint8_t)fk[i]; }
+    static const uint8_t ek[11][3] = {
+        {0x1B, 'R', 0}, {0x1B, 'Q', 0}, {0x1B, 'P', 0}, {0x7F, 0, 0},       // ROLL UP / ROLL DOWN / INS / DEL
+        {0x0B, 0, 0}, {0x08, 0, 0}, {0x0C, 0, 0}, {0x0A, 0, 0},             // ↑ ← → ↓
+        {0x1A, 0, 0}, {0, 0, 0}, {0x1E, 0, 0} };                            // HOME/CLR / HELP / SHIFT+HOME/CLR
+    for (int i = 0; i < 11; i++) memcpy(s_ekey[i], ek[i], 3);
+    s_keytab_init = true;
+}
+static uint8_t* keytab_entry(uint16_t ax, int* len) {
+    if (!s_keytab_init) keytab_default();
+    if (ax >= 0x01 && ax <= 0x14) { *len = 16; return s_fkey[ax - 1]; }
+    if (ax >= 0x15 && ax <= 0x1F) { *len = 6; return s_ekey[ax - 0x15]; }
+    *len = 0; return nullptr;
+}
+void dos_keytab_get(Machine* m, uint16_t ax, uint32_t a) {
+    if (!s_keytab_init) keytab_default();
+    if (ax == 0x0000 || ax == 0x00FF) {   // 全部（386 バイト）
+        for (int i = 0; i < 20; i++) for (int k = 0; k < 16; k++) mem_wb(m, a + i * 16 + k, s_fkey[i][k]);
+        for (int i = 0; i < 11; i++) for (int k = 0; k < 6; k++) mem_wb(m, a + 320 + i * 6 + k, s_ekey[i][k]);
+        return;
+    }
+    int len; uint8_t* e = keytab_entry(ax, &len);
+    if (e) for (int k = 0; k < len; k++) mem_wb(m, a + k, e[k]);
+}
+void dos_keytab_set(Machine* m, uint16_t ax, uint32_t a) {
+    if (!s_keytab_init) keytab_default();
+    if (ax == 0x0000 || ax == 0x00FF) {
+        for (int i = 0; i < 20; i++) for (int k = 0; k < 16; k++) s_fkey[i][k] = mem_rb(m, a + i * 16 + k);
+        for (int i = 0; i < 11; i++) for (int k = 0; k < 6; k++) s_ekey[i][k] = mem_rb(m, a + 320 + i * 6 + k);
+        return;
+    }
+    int len; uint8_t* e = keytab_entry(ax, &len);
+    if (e) for (int k = 0; k < len; k++) e[k] = mem_rb(m, a + k);
+}
+// 割り当てた文字列を入力待ちへ積む
+static void keytab_push(const uint8_t* e, int len) {
+    int st = 0;
+    if (len == 16 && e[0] == 0xFE) st = 6;   // 表示名つき
+    for (int k = st; k < len && e[k]; k++) s_pending_input.push_back((char)e[k]);
+}
+
 // ---- コンソール入力 ------------------------------------------------------------
 static bool con_have_char(Machine* m) {
+    if (!s_keytab_init) keytab_default();
     if (!s_pending_input.empty()) return true;
     while (bios_key_available(m)) {
         uint16_t k = bios_key_read(m, false);
         uint8_t ch = (uint8_t)k, sc = (uint8_t)(k >> 8);
+        // ファンクションキー（SHIFT つきは BIOS のコード 82h-8Bh）と編集キーは、割り当てた文字列に置き換える
+        int idx = -1; bool fkey = false;
+        if (sc >= 0x62 && sc <= 0x6B) { idx = sc - 0x62; fkey = true; }
+        else if (sc >= 0x82 && sc <= 0x8B) { idx = 10 + sc - 0x82; fkey = true; }
+        else if (sc >= 0x36 && sc <= 0x3F) {
+            idx = sc - 0x36;
+            if (sc == 0x3E && (m->kb_down[0x70] || m->kb_down[0x7D])) idx = 10;   // SHIFT+HOME/CLR
+        } else if (sc == 0xAE) idx = 10;
+        if (idx >= 0) {
+            bios_key_read(m, true);
+            if (fkey) keytab_push(s_fkey[idx], 16); else keytab_push(s_ekey[idx], 6);
+            if (!s_pending_input.empty()) return true;
+            continue;
+        }
         if (ch) return true;
         bios_key_read(m, true);
-        // ファンクションキー → MS-DOS 既定のエスケープ列
-        static const char fk[10] = {'S','T','U','V','W','E','J','P','Q','Z'};
-        if (sc >= 0x62 && sc <= 0x6B) { s_pending_input.push_back(0x1B); s_pending_input.push_back(fk[sc - 0x62]); return true; }
-        if (sc == 0x36) { s_pending_input.push_back(0x1B); s_pending_input.push_back('R'); return true; }   // ROLL UP
-        if (sc == 0x37) { s_pending_input.push_back(0x1B); s_pending_input.push_back('Q'); return true; }
-        if (sc == 0x38) { s_pending_input.push_back(0x1B); s_pending_input.push_back('P'); return true; }   // INS
     }
     return false;
 }
@@ -1421,6 +1482,7 @@ static void int21(Machine* m) {
         std::string n = read_asciiz(m, DS(m), DX(m));
         bool ex; std::string h = guest_to_host(m, n, &ex, nullptr, nullptr);
         HostDirEntry st;
+        if (m->cfg.trace) { static int cnt = 0; if (cnt++ < 40) plog("[dos] attr %s\n", n.c_str()); }
         if (!ex || !hostfs::stat(h, st)) { dos_error(m, 2); return; }
         if (AL(m) == 0) { SETCX(m, (uint16_t)((st.is_dir ? 0x10 : 0x20) | (st.readonly ? 1 : 0))); }
         dos_ok(m); return; }
@@ -2089,8 +2151,24 @@ void shell_start(Machine* m, const std::string& cmdline) {
     }
     if (m->cfg.current_drive && drive_valid(m, m->cfg.current_drive))
         s_curdrv = m->cfg.current_drive == m->cfg.drive ? 0 : m->cfg.current_drive;
+    // Start=GAME\GAME.EXE のようにゲームのフォルダの下のファイルなら、そのフォルダをカレントにして始める
+    // （フォルダの中で起動される前提のゲームが多い）。名前が英数字だけのときに限る
+    std::string cl = cmdline;
+    {
+        size_t sp = cl.find(' ');
+        std::string prog = cl.substr(0, sp);
+        size_t bs = prog.find_last_of("\\/");
+        bool ascii = true;
+        for (char ch : prog) if ((unsigned char)ch >= 0x80) ascii = false;
+        if (ascii && bs != std::string::npos && bs > 0 && !(prog.size() >= 2 && prog[1] == ':') && prog[0] != '\\' && prog[0] != '/') {
+            std::string d = prog.substr(0, bs);
+            for (auto& ch : d) { if (ch == '/') ch = '\\'; if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 32); }
+            s_cwd = d;
+            cl = "\\" + cl;
+        }
+    }
     BatchCtx b;
-    b.lines.push_back(cmdline);
+    b.lines.push_back(cl);
     s_batch.clear();
     s_batch.push_back(b);
     s_shell_running = true;
@@ -2141,6 +2219,7 @@ void dos_hle(Machine* m, uint8_t n) {
             count = rw(m, pk + 4);
             buf = lin(rw(m, pk + 8), rw(m, pk + 6));
         }
+        floppy::poll_change();
         std::vector<uint8_t> sec((size_t)im->lsec_size);
         bool ok = true;
         for (uint32_t i = 0; i < count && ok; i++) {
@@ -2184,6 +2263,7 @@ void dos_init(Machine* m) {
     s_sft[4].kind = 2; s_sft[4].refs = 1;
     s_frames.clear(); s_search.clear(); s_batch.clear(); s_env.clear();
     s_cwd.clear(); s_dircache.clear(); s_fdcwd.clear(); s_curdrv = 0; s_sg_drive = 0;
+    keytab_default(); s_pending_input.clear();
     s_retcode = 0; s_retcode_last = 0; s_shell_wait = 0; s_shell_running = false;
     s_alloc_strategy = 0;
 
@@ -2323,6 +2403,10 @@ void dos_state_save(Machine* m, StateW& w) {
     w.pod(s_curdrv); w.str(s_fdcwd);
     { char fl = floppy::drive_letter(); w.pod(fl); }
     w.str(floppy::image() ? floppy::image()->path : std::string());
+    if (!s_keytab_init) keytab_default();
+    w.tag("KEY1");
+    for (int i = 0; i < 20; i++) for (int k = 0; k < 16; k++) w.pod(s_fkey[i][k]);
+    for (int i = 0; i < 11; i++) for (int k = 0; k < 6; k++) w.pod(s_ekey[i][k]);
     w.u32((uint32_t)s_sft.size());
     for (auto& f : s_sft) {
         w.pod(f.refs); w.pod(f.kind); w.str(f.host); w.str(f.name); w.pod(f.mode); w.pod(f.owner);
@@ -2362,6 +2446,13 @@ void dos_state_load(Machine* m, StateR& r) {
             if (!floppy::insert(fp, &e)) plog("[state] フロッピーを入れ直せません: %s (%s)\n", fp.c_str(), e.c_str());
         }
     } else { s_curdrv = 0; s_fdcwd.clear(); }
+    keytab_default();
+    if (r.peek_tag("KEY1")) {
+        r.tag("KEY1");
+        for (int i = 0; i < 20; i++) for (int k = 0; k < 16; k++) r.pod(s_fkey[i][k]);
+        for (int i = 0; i < 11; i++) for (int k = 0; k < 6; k++) r.pod(s_ekey[i][k]);
+    }
+    s_pending_input.clear();
     // 今開いているホストのファイルを閉じる
     for (auto& f : s_sft) if (f.kind == 1 && f.h) hostfs::close(f.h);
     s_sft.clear();

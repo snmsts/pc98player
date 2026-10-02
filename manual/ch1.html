@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>第一章 基本的な使い方 - PC98PLAYER 取扱説明書</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">PC98PLAYER</a>
+  <a class="ch" href="index.html">目次</a>
+  <a class="ch cur" href="ch1.html">第一章 基本的な使い方</a>
+  <a class="ch" href="ch2.html">第二章 HDI イメージ</a>
+  <a class="ch" href="ch3.html">第三章 FDI イメージ</a>
+  <a class="ch" href="ch4.html">第四章 トラブルシューティング</a>
+</div></div>
+
+<div class="wrap">
+<header class="page">
+  <div class="kicker">第一章</div>
+  <h1>基本的な使い方</h1>
+  <p class="lead">ハードディスクにインストールした状態のゲームのフォルダをコピーして、その中で PC98PLAYER.EXE を実行する、いちばん基本の遊び方です。</p>
+</header>
+
+<nav class="toc">
+  <strong>この章の内容</strong>
+  <ol>
+    <li><a href="#prepare">用意するもの</a></li>
+    <li><a href="#first">はじめての起動</a></li>
+    <li><a href="#keys">操作方法</a></li>
+    <li><a href="#state">ステートセーブ／ロード</a></li>
+    <li><a href="#shared">EXE を 1 つだけ置いて使い回す</a></li>
+    <li><a href="#cmdline">コマンドラインからの起動</a></li>
+    <li><a href="#floppy">フロッピーを入れる（キーディスクなど）</a></li>
+    <li><a href="#ini">設定（PC98PLAYER.INI）</a></li>
+    <li><a href="#sound">音源の設定</a></li>
+    <li><a href="#memory">メモリ（EMS／XMS）の設定</a></li>
+  </ol>
+</nav>
+
+<h2 id="prepare">1-1. 用意するもの</h2>
+<ul>
+  <li>Windows 10 / 11（64bit）のパソコン</li>
+  <li><code>PC98PLAYER.EXE</code></li>
+  <li>PC-98 のゲームを、ハードディスクにインストールした状態のフォルダ（実機やほかの環境でインストールしたものをコピーしたもの。例: <code>C:\PC98\DOUKYU2</code>）</li>
+</ul>
+<p>実機の ROM、MS-DOS 本体、フロッピーやハードディスクのイメージは要りません。</p>
+<div class="note">ゲームがハードディスクイメージ（.HDI など）の形しかないときは<a href="ch2.html">第二章</a>、フロッピーのイメージや本物のフロッピーしかないときは<a href="ch3.html">第三章</a>の<strong>インストールアシスタント</strong>で、まずこの「ゲームのフォルダ」を作ります。</div>
+
+<h2 id="first">1-2. はじめての起動</h2>
+<div class="flow">
+  <div class="step"><b>STEP 1</b>ゲームのフォルダに <code>PC98PLAYER.EXE</code> をコピー</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>STEP 2</b><code>PC98PLAYER.EXE</code> をダブルクリック</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>STEP 3</b>最初に実行するファイルを選ぶ</div>
+  <div class="arrow">→</div>
+  <div class="step"><b>STEP 4</b>ゲームが始まる</div>
+</div>
+<p>フォルダに設定ファイル <code>PC98PLAYER.INI</code> が無いとき（初回）は、ゲームのフォルダを開いたファイル選択の画面が出ます。
+最初に実行するファイル（.BAT・.EXE・.COM など）を選んで「開く」を押してください。</p>
+<figure>
+  <img src="images/ch1_select_start.png" alt="最初に実行するファイルを選ぶ画面" width="490" height="313">
+  <figcaption>図 1-1　初回の起動で出る「最初に実行するファイル」の選択。ゲームの説明書で「〇〇.BAT で起動」とあるファイルを選びます。</figcaption>
+</figure>
+<p>選んだファイル名を <code>Start=</code> に書いた <code>PC98PLAYER.INI</code> が作られ、そのままゲームが始まります。次からは、ダブルクリックするだけでゲームが始まります。</p>
+<figure>
+  <img class="pixel" src="images/ch1_running.png" alt="ゲームが動いている画面" width="640" height="400">
+  <figcaption>図 1-2　起動したところ（画面はサンプル）。</figcaption>
+</figure>
+<pre>[PC98PLAYER]
+Start=NANPA2.BAT</pre>
+<ul>
+  <li>選択の画面を「キャンセル」で閉じたときは、起動しそうなファイルを推測して INI を作ります。</li>
+  <li>違うファイルが選ばれた・見つからないときは、INI の <code>Start=</code> をメモ帳で書き直して、もう一度起動してください。</li>
+  <li>サブフォルダの中のファイル（例: <code>GAME\GAME.EXE</code>）を選ぶと、そのフォルダをカレントにして起動します。</li>
+</ul>
+<div class="tip"><strong>ヒント:</strong> ゲームに付属する起動用のバッチファイル（<code>GAME.BAT</code> など）を <code>Start=</code> にすると、サウンドドライバの常駐なども含めて実機と同じ手順で起動します。</div>
+
+<h2 id="keys">1-3. 操作方法</h2>
+<div class="tablewrap">
+<table>
+  <tr><th>Windows のキー・操作</th><th>PC-98 での意味</th></tr>
+  <tr><td>英数字・記号キー</td><td>物理的な位置どおり（JIS 配列基準）</td></tr>
+  <tr><td><kbd>F1</kbd>〜<kbd>F10</kbd></td><td>f･1〜f･10</td></tr>
+  <tr><td><kbd>Alt</kbd></td><td>GRPH</td></tr>
+  <tr><td><kbd>カタカナひらがな</kbd> / <kbd>変換</kbd> / <kbd>無変換</kbd></td><td>カナ / XFER / NFER</td></tr>
+  <tr><td><kbd>Home</kbd> / <kbd>End</kbd></td><td>HOME CLR / HELP</td></tr>
+  <tr><td><kbd>PageDown</kbd> / <kbd>PageUp</kbd></td><td>ROLL UP / ROLL DOWN</td></tr>
+  <tr><td><kbd>Insert</kbd> / <kbd>Delete</kbd></td><td>INS / DEL</td></tr>
+  <tr><td><kbd>Pause</kbd> または <kbd>ScrollLock</kbd></td><td>STOP</td></tr>
+  <tr><td><kbd>PrintScreen</kbd></td><td>COPY</td></tr>
+  <tr><td>ウインドウをクリック</td><td>マウスを捕まえる（PC-98 のマウスとして動きます）</td></tr>
+  <tr><td><kbd>F12</kbd> または中ボタン（ホイール）クリック</td><td>マウスを放す（中ボタンは <code>MiddleRelease=0</code> で無効）</td></tr>
+  <tr><td><kbd>Shift</kbd>+<kbd>F11</kbd></td><td>ステートセーブ（保存先を選ぶ画面）</td></tr>
+  <tr><td><kbd>F11</kbd></td><td>ステートロード（読み込むスロットを選ぶ画面）</td></tr>
+  <tr><td><kbd>Shift</kbd>+<kbd>F12</kbd>（押している間）</td><td>早送り</td></tr>
+  <tr><td><kbd>Alt</kbd>+<kbd>Enter</kbd></td><td>全画面表示の切り替え</td></tr>
+  <tr><td><kbd>Alt</kbd>+<kbd>F4</kbd></td><td>終了</td></tr>
+</table>
+</div>
+
+<h2 id="state">1-4. ステートセーブ／ロード</h2>
+<p>ゲームの途中でセーブできない PC-98 のゲームでも、その瞬間の状態をまるごと保存・再開できます。</p>
+<figure>
+  <img src="images/ch1_state_menu.png" alt="ステートセーブ・ロードの画面" width="800" height="500">
+  <figcaption>図 1-3　F11 の画面。上の 2/3 に 8 個のスロット（縮小画像つき）、下の 1/3 にフロッピーの欄があります。</figcaption>
+</figure>
+<ul>
+  <li><kbd>Shift</kbd>+<kbd>F11</kbd> で保存用、<kbd>F11</kbd> で読み込み用の画面が開きます。</li>
+  <li>カーソルキーまたはマウスで選び、<kbd>Enter</kbd> か左クリックで決定、<kbd>Esc</kbd>・右クリック・<kbd>F11</kbd> で取り消します。</li>
+  <li>画面を開いている間、ゲームは止まっています。保存済みのスロットは上書きされます。</li>
+  <li>保存先はゲームのフォルダの <code>PC98PLAYER.SAV\SLOT1.P98S</code>〜<code>SLOT8.P98S</code> です（1 個 約 1.4MB）。窓を閉じても残ります。</li>
+  <li>下の「フロッピー」の欄では、フロッピーの出し入れができます（<a href="#floppy">1-7</a>・<a href="ch3.html#swap">第三章</a>）。</li>
+</ul>
+<div class="warn"><strong>注意:</strong> PC98PLAYER の版が大きく変わると、古いステートを読めなくなる場合があります。大事な進行は、できるだけゲーム本来のセーブ機能でも保存してください。</div>
+
+<h2 id="shared">1-5. EXE を 1 つだけ置いて使い回す</h2>
+<p><code>PC98PLAYER.EXE</code> を 1 か所（例: <code>C:\PC98PLAYER\</code>）に置いたまま、ゲームごとにショートカットを作って起動できます。</p>
+<ol class="steps">
+  <li>各ゲームのフォルダに <code>PC98PLAYER.INI</code> を置きます（無ければ初回起動時に作られます）。</li>
+  <li><code>PC98PLAYER.EXE</code> のショートカットを作り、プロパティの「<strong>作業フォルダー</strong>」にゲームのフォルダを指定します。</li>
+  <li>そのショートカットから起動すると、作業フォルダーの INI を読み、そのフォルダのゲームが動きます。</li>
+</ol>
+<p>どのフォルダのゲームを動かすかは、次の順に決まります。</p>
+<div class="tablewrap">
+<table>
+  <tr><th>順番</th><th>条件</th><th>ゲームのフォルダ</th></tr>
+  <tr><td>1</td><td>起動時の引数にフォルダか INI を指定した</td><td>そのフォルダ（INI なら INI のあるフォルダ）</td></tr>
+  <tr><td>2</td><td>作業フォルダー（カレント）に PC98PLAYER.INI がある</td><td>作業フォルダー</td></tr>
+  <tr><td>3</td><td>作業フォルダーに INI は無いが、実行ファイル（.BAT/.COM/.EXE）がある</td><td>作業フォルダー</td></tr>
+  <tr><td>4</td><td>上のどれでもない</td><td>EXE のフォルダ</td></tr>
+</table>
+</div>
+<p>INI に <code>Root=</code> を書くと、ゲームのフォルダを INI とは別の場所にできます（INI からの相対パスも可）。INI を 1 つのフォルダにまとめて管理したいときに便利です。</p>
+<pre>; C:\PC98\INI\DOUKYU2.INI
+[PC98PLAYER]
+Root=..\GAMES\DOUKYU2
+Start=NANPA2.BAT</pre>
+<p>この場合はショートカットのリンク先を <code>C:\PC98PLAYER\PC98PLAYER.EXE C:\PC98\INI\DOUKYU2.INI</code> のようにします。</p>
+
+<h2 id="cmdline">1-6. コマンドラインからの起動</h2>
+<div class="tablewrap">
+<table>
+  <tr><th>書き方</th><th>意味</th></tr>
+  <tr><td><code>PC98PLAYER.EXE</code></td><td>上の順番で決まったフォルダのゲームを起動します。</td></tr>
+  <tr><td><code>PC98PLAYER.EXE フォルダ</code></td><td>指定したフォルダのゲームを、そのフォルダの PC98PLAYER.INI で起動します。</td></tr>
+  <tr><td><code>PC98PLAYER.EXE 設定ファイル.INI</code></td><td>指定した INI で起動します。</td></tr>
+  <tr><td><code>PC98PLAYER.EXE イメージ.HDI</code></td><td>インストールアシスタント: ハードディスクイメージを作業フォルダーへ展開します（<a href="ch2.html">第二章</a>）。</td></tr>
+  <tr><td><code>PC98PLAYER.EXE DISK1.FDI DISK2.FDI …</code></td><td>インストールアシスタント: フロッピーイメージからインストールします（<a href="ch3.html">第三章</a>）。</td></tr>
+  <tr><td><code>PC98PLAYER.EXE A:\</code></td><td>インストールアシスタント: 本物のフロッピードライブからインストールします（<a href="ch3.html#realdrive">第三章</a>）。</td></tr>
+  <tr><td><code>PC98PLAYER.EXE --fontsheet</code></td><td>漢字の字形の一覧を <code>PC98FONT.BMP</code> に書き出して終了します（文字化けの確認用）。</td></tr>
+</table>
+</div>
+<p>エクスプローラーで、ファイルやドライブを <code>PC98PLAYER.EXE</code> のアイコンにドロップしても同じです。</p>
+
+<h2 id="floppy">1-7. フロッピーを入れる（キーディスクなど）</h2>
+<p>ゲームのフォルダはハードディスク（既定は A:）として見せたまま、フロッピーのイメージや本物のフロッピードライブを別のドライブ（既定は B:）に入れられます。
+「マスターディスク（キーディスク）を入れてください」と求めるゲームなどで使います。</p>
+<ul>
+  <li><strong>起動時に入れる:</strong> INI に <code>FloppyImage=</code>（イメージのファイル名。ゲームのフォルダからの相対パスかフルパス）と <code>FloppyDrive=</code> を書きます。</li>
+  <li><strong>途中で入れる・入れ替える・取り出す:</strong> <kbd>F11</kbd> の画面の下の「フロッピー」の欄から。<kbd>F</kbd>（入れる／実機…）でイメージや本物のドライブを選び、<kbd>E</kbd> で取り出します。</li>
+  <li><strong>使える形式:</strong> D88（.D88 .D68 .88D .D98）、FDI（Anex86）、NFD（T98-Next の r0・r1）、ヘッダ無しのベタ（.HDM .XDF .DUP .TFD .2HD .IMG など）、フラックスイメージ（.SCP・.HFE。読み込みのみ）。</li>
+  <li><strong>本物のドライブ:</strong> <code>FloppyImage=FDD:A</code>（USB フロッピー）や <code>FloppyImage=GW</code>（Greaseweazle）。詳しくは<a href="ch3.html#drives">第三章 3-7</a>。</li>
+</ul>
+<pre>[PC98PLAYER]
+Start=GAME.BAT
+FloppyImage=MASTER.D88
+FloppyDrive=B</pre>
+<div class="warn"><strong>注意:</strong> フロッピーへの書き込みは、その場でイメージファイルへ書き戻されます（元に戻せません）。大事なイメージは先にコピーを取ってから使ってください。キーディスクの確認で先へ進まないときは<a href="ch4.html#floppy">第四章 4-7</a>を見てください。</div>
+
+<h2 id="ini">1-8. 設定（PC98PLAYER.INI）</h2>
+<p>ゲームのフォルダの <code>PC98PLAYER.INI</code> をメモ帳などで編集します。文字コードは Shift_JIS・UTF-8 のどちらでも構いません。
+<code>;</code> から行末まではコメントです。書かなかった項目は既定値になります。</p>
+
+<h3>基本</h3>
+<div class="tablewrap">
+<table>
+  <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
+  <tr><td><code>Start=</code></td><td>（必須）</td><td>最初に実行するプログラムまたはバッチファイル。<code>GAME\GAME.EXE</code> のようにサブフォルダのファイルならそのフォルダを、<code>B:\INSTALL.BAT</code> のようにドライブ付きならそのドライブをカレントにして実行します。</td></tr>
+  <tr><td><code>Args=</code></td><td>なし</td><td><code>Start=</code> に渡す引数。</td></tr>
+  <tr><td><code>Title=</code></td><td>フォルダ名</td><td>ウインドウのタイトル。</td></tr>
+  <tr><td><code>Root=</code></td><td>INI のフォルダ</td><td>ゲームのフォルダ（INI からの相対パス可）。</td></tr>
+  <tr><td><code>ExitOnEnd=</code></td><td>1</td><td>1: ゲーム（バッチ）が終わったら窓を閉じる。0: 閉じずに最後の画面を残す（エラーメッセージの確認に便利）。</td></tr>
+  <tr><td><code>Drive=</code></td><td>A</td><td>ゲームのフォルダを何ドライブとして見せるか。ゲームが特定のドライブ名を前提にしている場合に変えます。</td></tr>
+  <tr><td><code>CurrentDrive=</code></td><td>なし</td><td>起動したときのカレントドライブ。書かなければ <code>Start=</code> に付けたドライブ（無ければゲームのドライブ）。</td></tr>
+  <tr><td><code>FreeSpaceMB=</code></td><td>96</td><td>ゲームのドライブの空き容量として見せる大きさ（MB、1〜1000）。大きすぎると計算があふれて「空きが足りない」と言うソフトがあるためです。</td></tr>
+  <tr><td><code>DOSVersion=</code></td><td>5.00</td><td>ゲームに見せる MS-DOS の版。「DOS のバージョンが違います」と出る場合に 3.30 などを試します。</td></tr>
+  <tr><td><code>FakeYear=</code></td><td>なし</td><td>ゲームに見せる年だけを置き換えます（例: <code>FakeYear=1998</code>）。<a href="ch4.html#y2k">2000 年問題</a>を参照。</td></tr>
+  <tr><td><code>FakeDate=</code></td><td>なし</td><td>起動した日をこの日付として見せます（例: <code>FakeDate=1999/12/31</code>）。<code>FakeYear=</code> より優先。</td></tr>
+</table>
+</div>
+
+<h3>フロッピー</h3>
+<div class="tablewrap">
+<table>
+  <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
+  <tr><td><code>FloppyImage=</code></td><td>なし</td><td>起動と同時に入れるフロッピーイメージ。<code>FDD:A</code>（USB フロッピー）、<code>GW</code>・<code>GW:COM5</code>（Greaseweazle）で本物のドライブも使えます。</td></tr>
+  <tr><td><code>FloppyDrive=</code></td><td>B</td><td>フロッピーを何ドライブとして見せるか（A〜Z。<code>Drive=</code> と同じ文字なら次の文字にずらします）。</td></tr>
+  <tr><td><code>FloppyWriteProtect=</code></td><td>0</td><td>1: 入れるフロッピーを必ず書き込み禁止にして見せる。</td></tr>
+  <tr><td><code>GWDrive=</code></td><td>A</td><td>Greaseweazle につないだドライブ（A / B。Shugart 接続なら 0 / 1 / 2）。</td></tr>
+  <tr><td><code>GWRevs=</code></td><td>3</td><td>Greaseweazle で 1 トラックを何回転ぶん読むか（1〜8）。</td></tr>
+</table>
+</div>
+
+<h3>画面</h3>
+<div class="tablewrap">
+<table>
+  <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
+  <tr><td><code>Scale=</code></td><td>2</td><td>表示倍率（1 で 640×400）。1〜8。</td></tr>
+  <tr><td><code>FullScreen=</code></td><td>0</td><td>1 で起動時から全画面。</td></tr>
+  <tr><td><code>Smooth=</code></td><td>0</td><td>1 で拡大時になめらかにする（0 はドットのまま）。</td></tr>
+  <tr><td><code>Font=</code></td><td>ＭＳ ゴシック</td><td>漢字の字形を作るもとにする Windows のフォント。</td></tr>
+  <tr><td><code>KanjiJIS=</code></td><td>78</td><td>78: PC-98 と同じ旧 JIS の字の並び。83: 新 JIS の並び。</td></tr>
+</table>
+</div>
+
+<h3>速さ・入力</h3>
+<div class="tablewrap">
+<table>
+  <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
+  <tr><td><code>CpuMHz=</code></td><td>16</td><td>仮想 CPU の速さ（MHz 相当）。命令の重さは 386 程度で数えているため、i486DX2（66MHz）推奨のソフトは 100〜133 くらいが目安です。上げるほどパソコン側の負荷が増えます。</td></tr>
+  <tr><td><code>MouseSpeed=</code></td><td>100</td><td>マウスの速さ（%）。</td></tr>
+  <tr><td><code>MouseDriver=</code></td><td>1</td><td>1: マウスドライバ（MOUSE.COM 相当）を用意する。0: 用意しない。</td></tr>
+  <tr><td><code>KeyRepeat=</code></td><td>1</td><td>0 にするとキーの押しっぱなしで連打を送らない。</td></tr>
+  <tr><td><code>PauseInactive=</code></td><td>0</td><td>1 で、ほかのウインドウを操作している間ゲームを止める。</td></tr>
+  <tr><td><code>MouseLockDisable=</code></td><td>0</td><td>1 にすると、マウスを一切捕まえません（マウスを使わないソフト向け）。</td></tr>
+  <tr><td><code>MiddleRelease=</code></td><td>1</td><td>中ボタン（ホイール）クリックでマウスを放す。0 で無効。</td></tr>
+</table>
+</div>
+
+<h3>音</h3>
+<div class="tablewrap">
+<table>
+  <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
+  <tr><td><code>SoundBoard=</code></td><td>86</td><td>86: PC-9801-86 相当（FM 6 音＋SSG＋リズム＋PCM）。26: PC-9801-26K 相当（FM 3 音＋SSG）。0: 音源なし。</td></tr>
+  <tr><td><code>SoundIRQ=</code></td><td>12</td><td>音源ボードの割込み（3 / 10 / 12 / 13）。</td></tr>
+  <tr><td><code>Sound=</code></td><td>1</td><td>0 で FM 音源の音を出さない（ボード自体はある扱い）。</td></tr>
+  <tr><td><code>Volume=</code></td><td>100</td><td>全体の音量（%、0〜1000）。音量の小さいソフト（Ray など）は 300 前後がおすすめ。</td></tr>
+  <tr><td><code>FMVolume=</code> / <code>SSGVolume=</code></td><td>100</td><td>FM 音源・SSG の音量（%）。</td></tr>
+  <tr><td><code>PCMVolume=</code></td><td>100</td><td>86 ボードの PCM の音量（%）。</td></tr>
+  <tr><td><code>BeepVolume=</code></td><td>50</td><td>ビープ音の音量（%）。</td></tr>
+  <tr><td><code>RhythmROM=</code></td><td>なし</td><td>リズム音源のサンプル（2608_RYM.WAV など）。無くても内蔵の合成音で鳴ります。</td></tr>
+  <tr><td><code>SampleRate=</code></td><td>44100</td><td>出力のサンプリング周波数。</td></tr>
+  <tr><td><code>MIDI=</code></td><td>0</td><td>1 で MIDI 音源（MPU-PC98II 相当）を載せ、Windows の MIDI 出力へ送る。</td></tr>
+  <tr><td><code>MidiDevice=</code></td><td>-1</td><td>MIDI の出力先の番号（-1 は Windows の既定）。</td></tr>
+  <tr><td><code>MidiIRQ=</code></td><td>6</td><td>MIDI ボードの割込み。</td></tr>
+  <tr><td><code>MidiSpeedFix=</code></td><td>100</td><td>MIDI の演奏速度（%、10〜1000）。「MIDI のときだけ曲が遅い」ソフトで 120〜150 などに。</td></tr>
+</table>
+</div>
+
+<h3>メモリ</h3>
+<div class="tablewrap">
+<table>
+  <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
+  <tr><td><code>EMS=</code></td><td>1</td><td>1: EMS（EMM386 相当）を用意する。</td></tr>
+  <tr><td><code>EMSKB=</code></td><td>4096</td><td>EMS の容量（KB）。</td></tr>
+  <tr><td><code>XMS=</code></td><td>1</td><td>1: XMS（HIMEM.SYS 相当）を用意する。</td></tr>
+  <tr><td><code>XMSKB=</code></td><td>8192</td><td>XMS の容量（KB）。</td></tr>
+  <tr><td><code>MemoryKB=</code></td><td>640</td><td>通常メモリの大きさ（KB）。</td></tr>
+  <tr><td><code>FirstMCB=</code></td><td>0200</td><td>空きメモリの始まる位置（16 進のセグメント）。一部のゲームはこの位置によって動いたり落ちたりします（<a href="ch4.html#crash">第四章</a>）。</td></tr>
+</table>
+</div>
+
+<h3>記録（トラブル調査用）</h3>
+<div class="tablewrap">
+<table>
+  <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
+  <tr><td><code>Trace=</code></td><td>0</td><td>1 にすると、ゲームのフォルダに <code>PC98PLAYER.LOG</code> を書き出します（<a href="ch4.html#trace">第四章 4-10</a>）。</td></tr>
+</table>
+</div>
+
+<h3>設定例</h3>
+<pre>; 東方 Project（PC-98 版）
+[PC98PLAYER]
+Start=GAME.BAT
+SoundBoard=86
+SoundIRQ=12
+
+; 古いゲームで速すぎる・メモリ関係で落ちる場合の例
+[PC98PLAYER]
+Start=GAME.EXE
+CpuMHz=8
+EMS=0
+XMS=0
+ExitOnEnd=0</pre>
+
+<h2 id="sound">1-9. 音源の設定</h2>
+<p>ゲームに付属のサウンドドライバ（PMD・MMD・PLAY5 など）は、バッチファイルに書かれたとおり本当に常駐して鳴ります。</p>
+<ul>
+  <li>多くのゲームは起動時に音源ボードを自動で判別します。既定の <code>SoundBoard=86</code> で、86 ボード用のドライバが選ばれるのが普通です。</li>
+  <li>音が出ない・変な場合は <code>SoundBoard=26</code> を試してください。</li>
+  <li>ゲーム側で割込み番号を設定する場合は <code>SoundIRQ=</code> を合わせます（INT0=3、INT41=10、INT5=12、INT6=13）。</li>
+  <li><code>MIDI=1</code> にすると、ゲームが FM より MIDI を選ぶことがあります。Windows 標準の MIDI 音源は当時の音源（SC-55 や MT-32）と音色が異なるので、FM で聴きたい場合は 0 のままにしてください。</li>
+</ul>
+
+<h2 id="memory">1-10. メモリ（EMS／XMS）の設定</h2>
+<p>実機で CONFIG.SYS に <code>HIMEM.SYS</code>（XMS）や <code>EMM386.EXE</code>（EMS）を組み込んでいた状態を再現します。
+ゲームの CONFIG.SYS に書かれたドライバは読み込まれません。代わりに、この設定で同じ機能を用意します。</p>
+<ul>
+  <li>通常メモリの空きは、起動した直後でおよそ 627KB です。</li>
+  <li>EMS や XMS があると落ちるゲームがあれば、<code>EMS=0</code>、<code>XMS=0</code> を 1 つずつ試してください。</li>
+  <li>DOS エクステンダ（プロテクトモード）や VCPI/DPMI を必要とするゲームには対応していません。</li>
+</ul>
+
+<div class="pager">
+  <a class="prev" href="index.html"><small>← 前へ</small>目次</a>
+  <a class="next" href="ch2.html"><small>次へ →</small>第二章 HDI イメージの利用</a>
+</div>
+</div>
+</body>
+</html>

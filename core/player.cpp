@@ -128,7 +128,8 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
     }
     ps->midi_device = I("MIDIDEVICE", -1);
     ps->cfg.floppy_image = G("FLOPPYIMAGE", "");
-    floppy::set_gw_options(G("GWDRIVE", "A"), I("GWREVS", 3));   // Greaseweazle のドライブと、1 トラックを何回転読むか
+    floppy::set_gw_options(G("GWDRIVE", "A"), I("GWREVS", 3));
+    floppy::set_force_wprot(I("FLOPPYWRITEPROTECT", 0) != 0);   // 1: 入れるフロッピーを必ず書き込み禁止にする   // Greaseweazle のドライブと、1 トラックを何回転読むか
     {
         std::string cd = G("CURRENTDRIVE", "");
         ps->cfg.current_drive = cd.empty() ? 0 : (char)toupper((unsigned char)cd[0]);
@@ -287,7 +288,26 @@ void Player::run_frame(bool render_video) {
     m->regw.clear();
     m->beepw.clear();
     sample_acc -= (double)(t1 - t0);
-    if (render_video) video_render(m, fb);
+    if (render_video) {
+        video_render(m, fb);
+        // INT 33h のカーソル（AX=1 で表示にしたゲームだけ）。実機のドライバと同じ形を VRAM ではなく画面に重ねる
+        if (m->cfg.emulate_mouse && m->mdrv.show >= 0) {
+            int ox = m->mouse.x - m->mdrv.hot_x, oy = m->mouse.y - m->mdrv.hot_y;
+            for (int yy = 0; yy < 16; yy++) {
+                int py = oy + yy;
+                if (py < 0 || py >= 400) continue;
+                uint16_t am = m->mdrv.shape[yy], xm = m->mdrv.shape[16 + yy];
+                for (int xx = 0; xx < 16; xx++) {
+                    int px = ox + xx;
+                    if (px < 0 || px >= 640) continue;
+                    bool a = (am >> (15 - xx)) & 1, x = (xm >> (15 - xx)) & 1;
+                    uint32_t& c = fb[py * 640 + px];
+                    if (!a) c = 0;
+                    if (x) c ^= 0xFFFFFF;
+                }
+            }
+        }
+    }
 }
 
 void Player::shutdown() {

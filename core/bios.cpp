@@ -460,17 +460,100 @@ static void int1c(Machine* m) {
 }
 
 // ---- INT 33h（マウスドライバ）-------------------------------------------------
+// ---- INT 33h（マウスドライバ）----------------------------------------------------
+//  MS-DOS 付属の MOUSE.SYS 相当。座標・ボタンは machine_mouse が直接更新する。
+//  ・カーソル（AX=1/2/9）: 表示カウンタと形を持ち、画面への重ね描きは Player が行う（VRAM は汚さない）
+//  ・イベントハンドラ（AX=0Ch/14h）: 実機のドライバと同じく IRQ13（INT 15h）をつなぎ、マウスの割込みの
+//    たびに、起きた出来事がマスクに合えばユーザのハンドラを far call する（ROM の入口: 下の stub）
+static const uint16_t k_arrow[32] = {
+    0x3FFF, 0x1FFF, 0x0FFF, 0x07FF, 0x03FF, 0x01FF, 0x00FF, 0x007F, 0x003F, 0x001F, 0x01FF, 0x10FF, 0x30FF, 0xF87F, 0xF87F, 0xFC3F,
+    0x0000, 0x4000, 0x6000, 0x7000, 0x7800, 0x7C00, 0x7E00, 0x7F00, 0x7F80, 0x7C00, 0x6C00, 0x4600, 0x0600, 0x0300, 0x0300, 0x0000 };
+static void mdrv_unhook(Machine* m) {
+    MouseDrv* d = &m->mdrv;
+    if (!d->hooked) return;
+    // 自分が入れたままなら元に戻す（ゲームが後から付け替えていたら触らない）
+    if (mem_rw(m, 0x15 * 4) == d->stub_off && mem_rw(m, 0x15 * 4 + 2) == ROMSEG) {
+        m->ram[0x54] = (uint8_t)d->old15_off; m->ram[0x55] = (uint8_t)(d->old15_off >> 8);
+        m->ram[0x56] = (uint8_t)d->old15_seg; m->ram[0x57] = (uint8_t)(d->old15_seg >> 8);
+    }
+    m->mouse.portc |= 0x10;   // マウスの割込みを止める
+    d->hooked = 0;
+}
+static void mdrv_hook(Machine* m) {
+    MouseDrv* d = &m->mdrv;
+    if (d->hooked || !d->stub_off) return;
+    d->old15_off = mem_rw(m, 0x15 * 4); d->old15_seg = mem_rw(m, 0x15 * 4 + 2);
+    m->ram[0x54] = (uint8_t)d->stub_off; m->ram[0x55] = (uint8_t)(d->stub_off >> 8);
+    m->ram[0x56] = (uint8_t)ROMSEG; m->ram[0x57] = (uint8_t)(ROMSEG >> 8);
+    m->mouse.portc &= (uint8_t)~0x10;          // マウスの割込みを許す
+    m->pic[1].imr &= (uint8_t)~0x20;           // スレーブの IR5（IRQ13）
+    m->pic[0].imr &= (uint8_t)~0x80;           // カスケード
+    pic_update_hint(m);
+    d->hooked = 1;
+}
+static void mdrv_set_handler(Machine* m, uint16_t mask, uint16_t seg, uint16_t off) {
+    MouseDrv* d = &m->mdrv;
+    d->cb_mask = mask; d->cb_seg = seg; d->cb_off = off;
+    d->events = 0; d->in_cb = 0;
+    if (mask && (seg || off)) mdrv_hook(m); else mdrv_unhook(m);
+}
+static void mdrv_reset(Machine* m, bool hw) {
+    Mouse* ms = &m->mouse;
+    MouseDrv* d = &m->mdrv;
+    d->show = -1;
+    memcpy(d->shape, k_arrow, sizeof(k_arrow)); d->hot_x = 0; d->hot_y = 0;
+    mdrv_set_handler(m, 0, 0, 0);
+    d->sens_x = d->sens_y = d->sens_d = 50;
+    ms->minx = 0; ms->maxx = 639; ms->miny = 0; ms->maxy = 399;
+    if (hw) { ms->x = 320; ms->y = 200; }
+    ms->mickey_x = 8; ms->mickey_y = 16;
+    ms->hle_dx = ms->hle_dy = 0;
+    for (int b = 0; b < 2; b++) ms->press_cnt[b] = ms->release_cnt[b] = 0;
+}
+// IRQ13 の入口から: EOI して、ハンドラを呼ぶなら AX..DI を用意して ZF=0
+static void mdrv_irq(Machine* m) {
+    for (int i = 0; i < 8; i++) if (m->pic[1].isr & (1u << i)) { m->pic[1].isr &= (uint8_t)~(1u << i); break; }
+    if (!m->pic[1].isr) m->pic[0].isr &= (uint8_t)~0x80;
+    pic_update_hint(m);
+    MouseDrv* d = &m->mdrv;
+    Mouse* ms = &m->mouse;
+    uint16_t ev = (uint16_t)(d->events & d->cb_mask);
+    d->events = 0;
+    if (!ev || d->in_cb || !d->cb_mask) { set_zf(m, true); return; }
+    uint32_t p = lin(ROMSEG, d->ptr_off);
+    m->ram[p] = (uint8_t)d->cb_off; m->ram[p + 1] = (uint8_t)(d->cb_off >> 8);
+    m->ram[p + 2] = (uint8_t)d->cb_seg; m->ram[p + 3] = (uint8_t)(d->cb_seg >> 8);
+    SETAX(m, ev);
+    SETBX(m, (uint16_t)((ms->buttons & 1) | ((ms->buttons & 2) ? 2 : 0)));
+    SETCX(m, (uint16_t)ms->x); SETDX(m, (uint16_t)ms->y);
+    m->cpu.r[ESI] = (m->cpu.r[ESI] & 0xFFFF0000u) | (uint16_t)d->mick_x;
+    m->cpu.r[EDI] = (m->cpu.r[EDI] & 0xFFFF0000u) | (uint16_t)d->mick_y;
+    d->in_cb = 1;
+    set_zf(m, false);
+}
 static void int33(Machine* m) {
     Mouse* ms = &m->mouse;
+    MouseDrv* d = &m->mdrv;
     uint16_t ax = AX(m);
+    auto clamp_pos = [&]() {
+        if (ms->x < ms->minx) ms->x = ms->minx; if (ms->x > ms->maxx) ms->x = ms->maxx;
+        if (ms->y < ms->miny) ms->y = ms->miny; if (ms->y > ms->maxy) ms->y = ms->maxy;
+    };
+    auto set_range = [&](bool xaxis) {
+        int lo = (int16_t)CX(m), hi = (int16_t)DX(m);
+        if (lo > hi) { int t = lo; lo = hi; hi = t; }
+        if (xaxis) { ms->minx = lo; ms->maxx = hi; } else { ms->miny = lo; ms->maxy = hi; }
+        clamp_pos();
+    };
     switch (ax) {
-    case 0x00: SETAX(m, 0xFFFF); SETBX(m, 2); ms->visible = 0; return;
-    case 0x01: ms->visible = 1; return;
-    case 0x02: ms->visible = 0; return;
+    case 0x00: mdrv_reset(m, true); SETAX(m, 0xFFFF); SETBX(m, 2); return;      // リセット（ボタン 2 つ）
+    case 0x21: mdrv_reset(m, false); SETAX(m, 0xFFFF); SETBX(m, 2); return;     // ソフトウェアリセット
+    case 0x01: if (d->show < 0) d->show++; return;
+    case 0x02: d->show--; return;
     case 0x03: {
         int b = (ms->buttons & 1) | ((ms->buttons & 2) ? 2 : 0);
         SETBX(m, (uint16_t)b); SETCX(m, (uint16_t)ms->x); SETDX(m, (uint16_t)ms->y); return; }
-    case 0x04: ms->x = (int16_t)CX(m); ms->y = (int16_t)DX(m); return;
+    case 0x04: ms->x = (int16_t)CX(m); ms->y = (int16_t)DX(m); clamp_pos(); return;
     case 0x05: case 0x06: {
         int b = BX(m) & 1;
         int bstate = (ms->buttons & 1) | ((ms->buttons & 2) ? 2 : 0);
@@ -478,18 +561,32 @@ static void int33(Machine* m) {
         if (ax == 5) { SETBX(m, (uint16_t)ms->press_cnt[b]); SETCX(m, (uint16_t)ms->press_x[b]); SETDX(m, (uint16_t)ms->press_y[b]); ms->press_cnt[b] = 0; }
         else { SETBX(m, (uint16_t)ms->release_cnt[b]); SETCX(m, (uint16_t)ms->release_x[b]); SETDX(m, (uint16_t)ms->release_y[b]); ms->release_cnt[b] = 0; }
         return; }
-    case 0x07: ms->minx = (int16_t)CX(m); ms->maxx = (int16_t)DX(m); if (ms->minx > ms->maxx) { int t = ms->minx; ms->minx = ms->maxx; ms->maxx = t; } return;
-    case 0x08: ms->miny = (int16_t)CX(m); ms->maxy = (int16_t)DX(m); if (ms->miny > ms->maxy) { int t = ms->miny; ms->miny = ms->maxy; ms->maxy = t; } return;
-    case 0x0B: SETCX(m, (uint16_t)ms->hle_dx); SETDX(m, (uint16_t)ms->hle_dy); ms->hle_dx = ms->hle_dy = 0; return;
-    case 0x0F: ms->mickey_x = CX(m); ms->mickey_y = DX(m); return;
-    // NEC の MOUSE.COM: 10h = 横の範囲、11h = 縦の範囲（CX=最小, DX=最大）
-    case 0x10: case 0x11: {
-        int lo = (int16_t)CX(m), hi = (int16_t)DX(m);
-        if (lo > hi) { int t = lo; lo = hi; hi = t; }
-        if (ax == 0x10) { ms->minx = lo; ms->maxx = hi; if (ms->x < lo) ms->x = lo; if (ms->x > hi) ms->x = hi; }
-        else { ms->miny = lo; ms->maxy = hi; if (ms->y < lo) ms->y = lo; if (ms->y > hi) ms->y = hi; }
+    case 0x07: set_range(true); return;
+    case 0x08: set_range(false); return;
+    case 0x09: {   // グラフィックカーソルの形: BX,CX = ホットスポット, ES:DX = AND マスク 16 ワード + XOR マスク 16 ワード
+        d->hot_x = (int16_t)BX(m); d->hot_y = (int16_t)CX(m);
+        uint32_t a = lin(m->cpu.sr[ES_], DX(m));
+        for (int i = 0; i < 32; i++) d->shape[i] = mem_rw(m, a + i * 2);
         return; }
-    case 0x21: SETAX(m, 0xFFFF); SETBX(m, 2); return;
+    case 0x0A: return;   // テキストカーソル（使わない）
+    case 0x0B: SETCX(m, (uint16_t)ms->hle_dx); SETDX(m, (uint16_t)ms->hle_dy); ms->hle_dx = ms->hle_dy = 0; return;
+    case 0x0C: mdrv_set_handler(m, CX(m), m->cpu.sr[ES_], DX(m)); return;
+    case 0x0F: ms->mickey_x = CX(m); ms->mickey_y = DX(m); return;
+    case 0x10: case 0x11: set_range(ax == 0x10); return;   // NEC の MOUSE.COM: 10h = 横の範囲、11h = 縦の範囲
+    case 0x13: return;   // 速度 2 倍のしきい値
+    case 0x14: {   // ハンドラの入れ替え: 古いものを CX, ES:DX に返す
+        uint16_t om = d->cb_mask, os = d->cb_seg, oo = d->cb_off;
+        mdrv_set_handler(m, CX(m), m->cpu.sr[ES_], DX(m));
+        SETCX(m, om); m->cpu.sr[ES_] = os; SETDX(m, oo);
+        return; }
+    case 0x15: SETBX(m, 64); return;          // 状態の保存に要る大きさ
+    case 0x16: case 0x17: return;              // 状態の保存・復元（何もしない）
+    case 0x1A: d->sens_x = BX(m); d->sens_y = CX(m); d->sens_d = DX(m); return;
+    case 0x1B: SETBX(m, (uint16_t)d->sens_x); SETCX(m, (uint16_t)d->sens_y); SETDX(m, (uint16_t)d->sens_d); return;
+    case 0x1C: return;                          // 割込みの速さ
+    case 0x1D: return;                          // 表示ページ
+    case 0x1E: SETBX(m, 0); return;
+    case 0x24: SETBX(m, 0x0700); m->cpu.r[ECX] = (m->cpu.r[ECX] & 0xFFFF0000u) | 0x0100; return;   // 版 7.00、バスマウス
     default:
         if (m->cfg.trace) plog("[bios] INT 33h AX=%04Xh 未対応\n", ax);
         return;
@@ -512,7 +609,23 @@ static void intdc(Machine* m) {
         default: return;
         }
     }
-    // 0Ch/0Dh: ファンクションキー定義の取得/設定 ―― 何もしない
+    if (cl == 0x13) {
+        // ドライブの DA/UA 一覧（MS-DOS 5.0 以降）: DS:DX に 96 バイト
+        //  +0: A-P の DA/UA（1 バイトずつ）, +1Ah: A-Z の {属性, DA/UA}（2 バイトずつ）
+        // インストーラが「今のドライブがフロッピーか」「ハードディスクはどれか」を調べるのに使う（下級生など）
+        uint32_t a = lin(m->cpu.sr[DS_], DX(m));
+        for (int i = 0; i < 96; i++) mem_wb(m, a + i, 0);
+        for (int i = 0; i < 16; i++) {
+            uint8_t da = m->ram[0x66C + i];
+            mem_wb(m, a + i, da);
+            if (da) { mem_wb(m, a + 0x1A + i * 2, 0x00); mem_wb(m, a + 0x1A + i * 2 + 1, da); }
+        }
+        if (m->cfg.trace) plog("[bios] INT DCh CL=13h（ドライブの DA/UA 一覧）\n");
+        return;
+    }
+    // 0Ch/0Dh: ファンクションキー・編集キーの割り当ての取得/設定（DOS のコンソール入力が使う）
+    if (cl == 0x0C) { dos_keytab_get(m, (uint16_t)m->cpu.r[EAX], lin(m->cpu.sr[DS_], DX(m))); return; }
+    if (cl == 0x0D) { dos_keytab_set(m, (uint16_t)m->cpu.r[EAX], lin(m->cpu.sr[DS_], DX(m))); return; }
 }
 
 // ---- 振り分け ----------------------------------------------------------------
@@ -534,10 +647,25 @@ void bios_hle(Machine* m, uint8_t n) {
     case HLE_INT1A: SETAH(m, 0x00); return;
     case HLE_INT1B:
         if (floppy::is_fd_da(AL(m))) { floppy::bios_int1b(m); return; }
+        {
+            // ハードディスク（SASI/IDE, DA 80h・00h のユニット 0 = ゲームのフォルダ）: 「付いている」ことだけ答える。
+            // インストーラがハードディスクの有無を SENSE（AH=x4h）で調べるため（下級生など）。
+            // セクタの読み書きはできない（ゲームのフォルダは DOS のドライブとしてだけ見せる）
+            uint8_t al = AL(m), cmd = (uint8_t)(AH(m) & 0x0F);
+            if ((al == 0x80 || al == 0x00)) {
+                uint8_t st = 0x60;
+                if (cmd == 0x04) st = 0x0F;                           // SENSE: 付いている（容量の種類）
+                else if (cmd == 0x03 || cmd == 0x07 || cmd == 0x0E) st = 0x00;   // 初期化・再較正・モード設定
+                if (m->cfg.trace) plog("[hd] INT1B AX=%04X → 結果 %02Xh\n", (unsigned)(m->cpu.r[EAX] & 0xFFFF), st);
+                SETAH(m, st); set_cf(m, st >= 0x20); return;
+            }
+        }
         if (m->cfg.trace) plog("[fd] INT1B AX=%04X（フロッピー以外の装置: 未接続を返す）\n", (unsigned)(m->cpu.r[EAX] & 0xFFFF));
         SETAH(m, 0x60); set_cf(m, true); return;
     case HLE_INT1F: SETAH(m, 0x00); set_cf(m, true); return;
-    case HLE_INT33: int33(m); return;
+    case HLE_INT33: if (m->cfg.trace > 1) plog("[mouse] INT 33h AX=%04X BX=%04X CX=%04X DX=%04X\n", AX(m), BX(m), CX(m), DX(m)); int33(m); return;
+    case HLE_MSIRQ: mdrv_irq(m); return;
+    case HLE_MSIRQ_END: m->mdrv.in_cb = 0; return;
     case HLE_INTDC: intdc(m); return;
     case HLE_INT06: {
         uint32_t a = lin(m->cpu.sr[SS_], (uint16_t)m->cpu.r[ESP]);
@@ -589,7 +717,17 @@ void bios_init(Machine* m) {
     bios_hook_vec(m, 0x1C, HLE_INT1C);
     bios_hook_vec(m, 0x1F, HLE_INT1F);
     bios_hook_vec(m, 0xDC, HLE_INTDC);
-    if (m->cfg.emulate_mouse) bios_hook_vec(m, 0x33, HLE_INT33);
+    if (m->cfg.emulate_mouse) {
+        bios_hook_vec(m, 0x33, HLE_INT33);
+        // マウスのイベントハンドラを呼ぶ IRQ13 の入口:
+        //   pusha; push ds; push es; HLE MSIRQ; jz skip; call far [cs:ptr]; HLE MSIRQ_END; skip: pop es; pop ds; popa; iret
+        static const uint8_t z4[4] = {0, 0, 0, 0};
+        m->mdrv.ptr_off = put_stub(m, z4, 4);
+        uint8_t code[] = {0x60, 0x1E, 0x06, 0xF1, HLE_MSIRQ, 0x74, 0x07, 0x2E, 0xFF, 0x1E,
+                          (uint8_t)m->mdrv.ptr_off, (uint8_t)(m->mdrv.ptr_off >> 8), 0xF1, HLE_MSIRQ_END, 0x07, 0x1F, 0x61, 0xCF};
+        m->mdrv.stub_off = put_stub(m, code, sizeof(code));
+        mdrv_reset(m, true);
+    }
 
     // BIOS ワークエリア
     r[0x500] = 0x00;
@@ -600,6 +738,7 @@ void bios_init(Machine* m) {
     r[0x480] = 0x00;
     r[0x481] = 0x00;
     r[0x458] = 0x00;
+    r[0x55D] = 0x01;               // ハードディスク（SASI/IDE）がユニット 0 に付いている（ゲームのフォルダ）
     r[0x55C] = 0x03;               // 1MB の FDD がユニット 0・1 に付いている（仮想フロッピーはユニット 0）
     r[0x712] = 24;                 // MS-DOS: テキストの行数-1（master.lib などが参照）
     r[0x71D] = 0xE1;               // 同: 今の表示属性（白）。Borland C の conio などが初期値として読む

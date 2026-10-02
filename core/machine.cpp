@@ -338,10 +338,12 @@ void machine_mouse(Machine* m, int dx, int dy, int buttons) {
     ms->x += dx; ms->y += dy;
     if (ms->x < ms->minx) ms->x = ms->minx; if (ms->x > ms->maxx) ms->x = ms->maxx;
     if (ms->y < ms->miny) ms->y = ms->miny; if (ms->y > ms->maxy) ms->y = ms->maxy;
+    if (dx || dy) m->mdrv.events |= 1;
+    m->mdrv.mick_x += dx; m->mdrv.mick_y += dy;
     for (int b = 0; b < 2; b++) {
         bool was = (ms->buttons >> b) & 1, now = (buttons >> b) & 1;
-        if (now && !was) { ms->press_cnt[b]++; ms->press_x[b] = ms->x; ms->press_y[b] = ms->y; }
-        if (!now && was) { ms->release_cnt[b]++; ms->release_x[b] = ms->x; ms->release_y[b] = ms->y; }
+        if (now && !was) { ms->press_cnt[b]++; ms->press_x[b] = ms->x; ms->press_y[b] = ms->y; m->mdrv.events |= (uint16_t)(b ? 8 : 2); }
+        if (!now && was) { ms->release_cnt[b]++; ms->release_x[b] = ms->x; ms->release_y[b] = ms->y; m->mdrv.events |= (uint16_t)(b ? 16 : 4); }
     }
     ms->buttons = (uint8_t)buttons;
 }
@@ -730,7 +732,10 @@ void io_out8(Machine* m, uint16_t port, uint8_t v) {
     case 0x77: case 0x3FDF: pit_ctrl(m, v); return;
     case 0x7FDD: mouse_set_portc(m, v); return;
     case 0x7FDF:
-        if (!(v & 0x80)) {
+        if (v & 0x80) {
+            // 8255 のモード設定: 出力のポート（C の上位: HC・選択・割込み禁止）はすべて 0 になる
+            mouse_set_portc(m, (uint8_t)(m->mouse.portc & 0x0F));
+        } else {
             int bit = (v >> 1) & 7;
             uint8_t nc = (v & 1) ? (uint8_t)(m->mouse.portc | (1 << bit)) : (uint8_t)(m->mouse.portc & ~(1 << bit));
             mouse_set_portc(m, nc);
@@ -985,6 +990,7 @@ void machine_state_save(Machine* m, StateW& w) {
     egc_state_save(w);
     w.tag("MPU2"); w.pod(m->mpu);
     pcm86_state_save(m, w);
+    w.tag("MDRV"); w.pod(m->mdrv);
 }
 
 void machine_state_load(Machine* m, StateR& r) {
@@ -1019,6 +1025,7 @@ void machine_state_load(Machine* m, StateR& r) {
     }
     m->midi_out.clear();
     pcm86_state_load(m, r);
+    if (r.peek_tag("MDRV")) { r.tag("MDRV"); uint16_t so = m->mdrv.stub_off, po = m->mdrv.ptr_off; r.pod(m->mdrv); m->mdrv.stub_off = so; m->mdrv.ptr_off = po; }
     // 派生状態の作り直し
     g_addr_mask = m->a20 ? 0x1FFFFF : 0xFFFFF;
     m->regw.clear(); m->beepw.clear();
