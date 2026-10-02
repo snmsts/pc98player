@@ -25,6 +25,7 @@
 #include "../core/hostfs.h"
 #include "../core/floppy.h"
 #include "../core/fdreal.h"
+#include "../core/hdimage.h"
 #include "hostfont.h"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -713,6 +714,64 @@ static void take_path(const fs::path& a, fs::path* dir, fs::path* ini) {
     else if (upper(U8(a.extension())) == ".INI") { *ini = a; *dir = a.parent_path(); }
     else { *dir = a.parent_path(); *ini = *dir / "PC98PLAYER.INI"; }
 }
+static bool ask_yes_no(const std::string& title, const std::string& text) {
+    const SDL_MessageBoxButtonData bt[2] = {
+        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "はい"},
+        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "いいえ"},
+    };
+    SDL_MessageBoxData d = {SDL_MESSAGEBOX_INFORMATION, g_win, title.c_str(), text.c_str(), 2, bt, nullptr};
+    int id = 0;
+    return SDL_ShowMessageBox(&d, &id) && id == 1;
+}
+// ハードディスクイメージの中身を、イメージの横の同じ名前のフォルダへ展開して、そこをゲームのフォルダにする
+//  戻り値: 1 = 展開した（*dir に展開先）, 0 = やめた, -1 = 失敗
+static int extract_hd_image(const fs::path& image, fs::path* dir) {
+    std::error_code ec;
+    fs::path dest = image.parent_path() / image.stem();
+    hdimage::Info info; std::string err;
+    if (!hdimage::probe(U8(image), &info, &err)) {
+        message(SDL_MESSAGEBOX_ERROR, "ハードディスクイメージを読めません:\n" + U8(image) + "\n\n" + err);
+        return -1;
+    }
+    if (!ask_yes_no("インストールアシスタント - ハードディスクイメージの展開",
+                    "「" + U8(image.filename()) + "」（" + info.format + "・MS-DOS の区画 " + std::to_string(info.parts.size()) +
+                    " 個）の中身を、次のフォルダへ展開します。\n\n" + U8(dest) +
+                    "\n\n同じ名前のファイルが既にあるときは上書きしません。よろしいですか？")) return 0;
+    fs::create_directories(dest, ec);
+    hdimage::Result res;
+    if (!hdimage::extract(U8(image), U8(dest), &res, &err)) {
+        message(SDL_MESSAGEBOX_ERROR, "展開できませんでした: " + err);
+        return -1;
+    }
+    // 飛ばしたファイル・読めなかったもの・区画が複数あるときだけ、詳しい結果を見せる
+    if (res.skipped || res.errors || info.parts.size() > 1) {
+        char sum[160];
+        snprintf(sum, sizeof(sum), "展開しました: ファイル %d 個・フォルダ %d 個（%.1f MB）", res.files, res.dirs, res.bytes / 1048576.0);
+        std::string msg = sum;
+        if (res.skipped) msg += "\n既にあったので飛ばしたファイル: " + std::to_string(res.skipped) + " 個";
+        if (res.errors) msg += "\n読めなかったもの: " + std::to_string(res.errors) + " 個";
+        msg += "\n";
+        for (size_t i = 0; i < res.notes.size() && i < 12; i++) msg += "\n・" + res.notes[i];
+        message(res.errors ? SDL_MESSAGEBOX_WARNING : SDL_MESSAGEBOX_INFORMATION, msg);
+    }
+    // INI が無ければ AUTOEXEC.BAT（あれば）で作る。それ以外は起動時のひな形作りに任せる
+    if (!fs::exists(dest / "PC98PLAYER.INI", ec) && fs::is_regular_file(dest / "AUTOEXEC.BAT", ec))
+        write_template_ini(U8(dest / "PC98PLAYER.INI"), "AUTOEXEC.BAT");
+    *dir = dest;
+    return 1;
+}
+// 引数やドロップで来たもの: ハードディスクイメージなら展開してから。false = 起動しない
+static bool take_arg(const fs::path& a, fs::path* dir, fs::path* ini) {
+    std::error_code ec;
+    if (fs::is_regular_file(a, ec) && hdimage::is_hd_image(U8(a))) {
+        fs::path d;
+        if (extract_hd_image(a, &d) != 1) return false;
+        take_path(d, dir, ini);
+        return true;
+    }
+    take_path(a, dir, ini);
+    return true;
+}
 // アプリを置いた場所。macOS の .app なら、その .app があるフォルダ
 static fs::path app_dir(const fs::path& base) {
     for (fs::path p = base; p.has_relative_path(); p = p.parent_path()) {
@@ -767,13 +826,17 @@ static bool pick_folder(fs::path* out) {
 // 順に: 引数 → .app に落とされたもの → カレントフォルダ → アプリの隣 → 選ぶ画面
 static bool find_game(int argc, char** argv, fs::path* dir, fs::path* ini) {
     std::error_code ec;
-    if (argc >= 2 && argv[1][0] != '-') { take_path(norm(P(argv[1])), dir, ini); return true; }
+    if (argc >= 2 && argv[1][0] != '-') return take_arg(norm(P(argv[1])), dir, ini);
 #ifdef __APPLE__
     // Finder で .app にフォルダを落として起動すると、起動直後にドロップとして届く
     for (Uint64 until = SDL_GetTicks() + 300; SDL_GetTicks() < until;) {
         SDL_Event e;
         while (SDL_PollEvent(&e))
-            if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) { take_path(norm(P(e.drop.data)), dir, ini); save_recent(*dir); return true; }
+            if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) {
+                if (!take_arg(norm(P(e.drop.data)), dir, ini)) return false;
+                save_recent(*dir);
+                return true;
+            }
         SDL_Delay(10);
     }
 #endif
@@ -786,7 +849,7 @@ static bool find_game(int argc, char** argv, fs::path* dir, fs::path* ini) {
     if (U8(ad).find("/AppTranslocation/") == std::string::npos && has_game(ad)) { take_path(ad, dir, ini); return true; }
     fs::path picked;
     if (!pick_folder(&picked)) return false;
-    take_path(norm(picked), dir, ini);
+    if (!take_arg(norm(picked), dir, ini)) return false;
     save_recent(*dir);
     return true;
 }
