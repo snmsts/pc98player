@@ -25,6 +25,8 @@
 #include "../core/hostfs.h"
 #include "../core/floppy.h"
 #include "../core/fdreal.h"
+#include "../core/hdimage.h"
+#include <algorithm>
 
 
 static Player*       g_p = nullptr;
@@ -327,10 +329,16 @@ static SlotInfo g_slots[STATE_SLOTS];
 static std::wstring g_menu_note;          // メニュー内の一言（空きスロットを選んだ等）
 static std::wstring g_toast;              // 閉じた後にしばらく出す結果
 static DWORD    g_toast_until = 0;
-static const int MENU_COLS = 4, CELL_W = 150, CELL_H = 132, GRID_X = 20, GRID_Y = 62;
-// フロッピーの欄（スロットの下）: 640x400 の座標
-static const int FD_Y = 328, FD_H = 22, FD_INS_X = 392, FD_INS_W = 128, FD_EJ_X = 526, FD_EJ_W = 94;
-enum { HIT_FD_INSERT = -2, HIT_FD_EJECT = -3 };
+static const int MENU_COLS = 4, CELL_W = 150, CELL_H = 104, GRID_X = 20, GRID_Y = 36;
+// フロッピーの欄（スロットの下の 1/3）: 640x400 の座標
+static const int FD_BOX_Y = 250, FD_BOX_H = 98;
+static const int FD_Y = 320, FD_H = 22;                       // ボタンの段
+static const int FD_INS_X = 30, FD_INS_W = 156, FD_EJ_X = 194, FD_EJ_W = 110;
+static const int FD_PREV_X = 382, FD_PREV_W = 110, FD_NEXT_X = 500, FD_NEXT_W = 110;
+enum { HIT_FD_INSERT = -2, HIT_FD_EJECT = -3, HIT_FD_NEXT = -4, HIT_FD_PREV = -5 };
+static std::vector<std::wstring> g_disk_list;   // まとめて渡されたフロッピーイメージ（「次のディスク」で順に入れ替える）
+static int g_disk_index = 0;
+static void fd_insert_listed(int k);
 
 static void menu_open(int kind) {
     if (!g_p) return;
@@ -354,10 +362,16 @@ static void show_toast(const std::wstring& t) { g_toast = t; g_toast_until = Get
 // ---- 仮想フロッピー --------------------------------------------------------------
 static std::wstring fd_name() {
     FloppyImage* im = floppy::image();
-    if (!im) return L"（空）";
+    if (!im) return L"（入っていません）";
     std::wstring p = W(im->path);
     size_t k = p.find_last_of(L"\\/");
-    return (k == std::wstring::npos ? p : p.substr(k + 1)) + L"  [" + W(im->format) + (im->wprot ? L"・書込禁止" : L"") + L"]";
+    return k == std::wstring::npos ? p : p.substr(k + 1);
+}
+static std::wstring fd_info() {
+    FloppyImage* im = floppy::image();
+    if (!im) return L"";
+    static const wchar_t* md[] = {L"2D", L"2DD", L"2HD", L"1.44MB"};
+    return W(im->format) + L"・" + (im->media >= 0 && im->media <= 3 ? md[im->media] : L"?") + (im->wprot ? L"・書き込み禁止" : L"");
 }
 static void fd_insert_dialog() {
     wchar_t file[MAX_PATH] = L"";
@@ -420,6 +434,10 @@ static void fd_save_d88() {
 static void fd_menu(bool at_mouse) {
     HMENU mnu = CreatePopupMenu();
     AppendMenuW(mnu, MF_STRING, 1, L"イメージファイルを選ぶ…");
+    for (size_t i = 0; i < g_disk_list.size() && i < 40; i++) {
+        std::wstring n = g_disk_list[i].substr(g_disk_list[i].find_last_of(L"\\/") + 1);
+        AppendMenuW(mnu, MF_STRING | ((int)i == g_disk_index && floppy::image() ? MF_CHECKED : 0), 200 + (UINT)i, (std::to_wstring(i + 1) + L" 枚目: " + n).c_str());
+    }
     std::vector<fdreal::Device> devs = fdreal::list_devices();
     AppendMenuW(mnu, MF_SEPARATOR, 0, nullptr);
     bool has_gw = false;
@@ -448,8 +466,24 @@ static void fd_menu(bool at_mouse) {
     }
     else if (id == 4) fd_save_d88();
     else if (id >= 100 && id < 100 + (int)devs.size()) fd_insert_device(devs[id - 100].spec);
+    else if (id >= 200 && id < 200 + (int)g_disk_list.size()) fd_insert_listed(id - 200);
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
+// まとめて渡されたイメージの k 枚目を入れる
+static void fd_insert_listed(int k) {
+    if (k < 0 || k >= (int)g_disk_list.size()) return;
+    std::string err;
+    if (floppy::insert(U(g_disk_list[k]), &err)) {
+        g_disk_index = k;
+        std::wstring n = g_disk_list[k].substr(g_disk_list[k].find_last_of(L"\\/") + 1);
+        wchar_t buf[200]; swprintf(buf, 200, L"%c: ← %ls（%d/%d）", (wchar_t)floppy::drive_letter(), n.c_str(), k + 1, (int)g_disk_list.size());
+        show_toast(buf);
+        menu_close();
+    } else g_menu_note = L"入れられませんでした: " + W(err);
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+static void fd_next_disk() { if (g_disk_list.size() > 1) fd_insert_listed((g_disk_index + 1) % (int)g_disk_list.size()); }
+static void fd_prev_disk() { if (g_disk_list.size() > 1) fd_insert_listed((g_disk_index + (int)g_disk_list.size() - 1) % (int)g_disk_list.size()); }
 static void fd_eject() {
     if (!floppy::image()) { g_menu_note = L"フロッピーは入っていません"; InvalidateRect(g_hwnd, nullptr, FALSE); return; }
     floppy::eject();
@@ -494,6 +528,8 @@ static int menu_hit(int x, int y) {
     if (ly >= FD_Y && ly < FD_Y + FD_H) {
         if (lx >= FD_INS_X && lx < FD_INS_X + FD_INS_W) return HIT_FD_INSERT;
         if (lx >= FD_EJ_X && lx < FD_EJ_X + FD_EJ_W) return HIT_FD_EJECT;
+        if (g_disk_list.size() > 1 && lx >= FD_NEXT_X && lx < FD_NEXT_X + FD_NEXT_W) return HIT_FD_NEXT;
+        if (g_disk_list.size() > 1 && lx >= FD_PREV_X && lx < FD_PREV_X + FD_PREV_W) return HIT_FD_PREV;
     }
     return -1;
 }
@@ -517,7 +553,7 @@ static void draw_menu(HDC dc, int dx, int dy, int dw, int dh) {
     auto S = [&](double v) { return (int)(v * k + 0.5); };
     (void)dh;
     bool save = g_menu == MENU_SAVE;
-    draw_text(dc, X(0), Y(14), S(20), save ? RGB(255, 210, 120) : RGB(140, 210, 255),
+    draw_text(dc, X(0), Y(8), S(18), save ? RGB(255, 210, 120) : RGB(140, 210, 255),
               save ? L"ステートセーブ ― 保存するスロットを選んでください" : L"ステートロード ― 読み込むスロットを選んでください",
               true, S(640));
     BITMAPINFO bi = {};
@@ -539,7 +575,7 @@ static void draw_menu(HDC dc, int dx, int dy, int dw, int dh) {
         FillRect(dc, &in, bg);
         DeleteObject(bg);
         // 縮小画像
-        int tx = cx + 7, ty = cy + 7, tw = 130, th = 81;
+        int tw = 96, th = 60, tx = cx + (CELL_W - 6 - tw) / 2, ty = cy + 6;
         const SlotInfo& si = g_slots[i];
         if (si.used && si.thumb.size() == px.size() * 3) {
             for (size_t j = 0; j < px.size(); j++)
@@ -550,18 +586,34 @@ static void draw_menu(HDC dc, int dx, int dy, int dw, int dh) {
             HBRUSH e = CreateSolidBrush(RGB(34, 34, 44));
             RECT er = {X(tx), Y(ty), X(tx) + S(tw), Y(ty) + S(th)};
             FillRect(dc, &er, e); DeleteObject(e);
-            draw_text(dc, X(tx), Y(ty + 32), S(14), RGB(110, 110, 130), L"― 空き ―", true, S(tw));
+            draw_text(dc, X(tx), Y(ty + 23), S(13), RGB(110, 110, 130), L"― 空き ―", true, S(tw));
         }
         wchar_t lab[32]; swprintf(lab, 32, L"スロット %d", i + 1);
-        draw_text(dc, X(cx + 8), Y(cy + 91), S(14), sel ? RGB(255, 255, 255) : RGB(200, 200, 210), lab, false, 0);
-        draw_text(dc, X(cx + 8), Y(cy + 108), S(12), sel ? RGB(230, 230, 230) : RGB(150, 150, 165),
+        draw_text(dc, X(cx + 8), Y(cy + 69), S(13), sel ? RGB(255, 255, 255) : RGB(200, 200, 210), lab, false, 0);
+        draw_text(dc, X(cx + 8), Y(cy + 84), S(11), sel ? RGB(230, 230, 230) : RGB(150, 150, 165),
                   si.used ? W(si.when) : L"", false, 0);
     }
-    // フロッピーの欄
+    // フロッピーの欄（画面の下 1/3）
     {
-        wchar_t lab[16]; swprintf(lab, 16, L"FD %c:", (wchar_t)(floppy::drive_letter() ? floppy::drive_letter() : L'-'));
-        draw_text(dc, X(GRID_X), Y(FD_Y + 3), S(14), RGB(255, 230, 150), lab, false, 0);
-        draw_text(dc, X(GRID_X + 56), Y(FD_Y + 4), S(13), floppy::image() ? RGB(235, 235, 245) : RGB(130, 130, 145), fd_name(), false, 0);
+        HBRUSH pb = CreateSolidBrush(RGB(70, 80, 110));
+        RECT pr = {X(GRID_X), Y(FD_BOX_Y), X(640 - GRID_X), Y(FD_BOX_Y + FD_BOX_H)};
+        FillRect(dc, &pr, pb); DeleteObject(pb);
+        HBRUSH ib = CreateSolidBrush(RGB(24, 28, 42));
+        RECT ir = {pr.left + S(1), pr.top + S(1), pr.right - S(1), pr.bottom - S(1)};
+        FillRect(dc, &ir, ib); DeleteObject(ib);
+        wchar_t lab[40]; swprintf(lab, 40, L"フロッピー（%c:）", (wchar_t)(floppy::drive_letter() ? floppy::drive_letter() : L'-'));
+        draw_text(dc, X(GRID_X + 10), Y(FD_BOX_Y + 8), S(14), RGB(255, 230, 150), lab, false, 0);
+        if (g_disk_list.size() > 1) {
+            wchar_t cnt[48]; swprintf(cnt, 48, L"%d / %d 枚目", g_disk_index + 1, (int)g_disk_list.size());
+            draw_text(dc, X(420), Y(FD_BOX_Y + 8), S(14), RGB(255, 230, 150), cnt, true, S(190));
+        }
+        // 名前（長ければ後ろを省く）と形式
+        std::wstring nm = fd_name();
+        double wsum = 0; size_t cut = nm.size();
+        for (size_t i = 0; i < nm.size(); i++) { wsum += nm[i] < 0x100 ? 7.5 : 15; if (wsum > 560) { cut = i; break; } }
+        if (cut < nm.size()) nm = nm.substr(0, cut) + L"…";
+        draw_text(dc, X(GRID_X + 10), Y(FD_BOX_Y + 28), S(15), floppy::image() ? RGB(240, 240, 250) : RGB(130, 130, 145), nm, false, 0);
+        draw_text(dc, X(GRID_X + 10), Y(FD_BOX_Y + 48), S(12), RGB(160, 165, 185), fd_info(), false, 0);
         auto button = [&](int bx, int bw, const wchar_t* t) {
             HBRUSH b = CreateSolidBrush(RGB(60, 70, 100));
             RECT r = {X(bx), Y(FD_Y), X(bx + bw), Y(FD_Y + FD_H)};
@@ -570,6 +622,10 @@ static void draw_menu(HDC dc, int dx, int dy, int dw, int dh) {
         };
         button(FD_INS_X, FD_INS_W, L"F: 入れる／実機…");
         button(FD_EJ_X, FD_EJ_W, L"E: 取り出す");
+        if (g_disk_list.size() > 1) {
+            button(FD_PREV_X, FD_PREV_W, L"P: 前のディスク");
+            button(FD_NEXT_X, FD_NEXT_W, L"N: 次のディスク");
+        }
     }
     if (!g_menu_note.empty())
         draw_text(dc, X(0), Y(356), S(15), RGB(255, 120, 120), g_menu_note, true, S(640));
@@ -577,9 +633,30 @@ static void draw_menu(HDC dc, int dx, int dy, int dw, int dh) {
               L"カーソルキー / マウス: 選ぶ　　Enter / 左クリック: 決定　　Esc / 右クリック: やめる", true, S(640));
 }
 
+// フロッピーからのインストールの画面（install_ui.inc）
+static bool iu_active();
+static bool iu_message(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+static void draw_install(HDC dc, int dx, int dy, int dw, int dh);
+
 static void present(HDC dc) {
     RECT rc; GetClientRect(g_hwnd, &rc);
     int cw = rc.right, ch = rc.bottom;
+    if (cw > 0 && ch > 0 && iu_active()) {   // フロッピーからのインストールの画面
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bm = CreateCompatibleBitmap(dc, cw, ch);
+        HGDIOBJ ob = SelectObject(mem, bm);
+        RECT all = {0, 0, cw, ch};
+        FillRect(mem, &all, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        int dx, dy, dw, dh;
+        view_rect(cw, ch, &dx, &dy, &dw, &dh);
+        HBRUSH bg = CreateSolidBrush(RGB(30, 34, 48));
+        RECT vr = {dx, dy, dx + dw, dy + dh};
+        FillRect(mem, &vr, bg); DeleteObject(bg);
+        draw_install(mem, dx, dy, dw, dh);
+        BitBlt(dc, 0, 0, cw, ch, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, ob); DeleteObject(bm); DeleteDC(mem);
+        return;
+    }
     if (cw <= 0 || ch <= 0 || !g_p) return;
     int dx, dy, dw, dh;
     view_rect(cw, ch, &dx, &dy, &dw, &dh);
@@ -609,7 +686,9 @@ static void present(HDC dc) {
         StretchDIBits(mem, dx, dy, dw, dh, 0, 0, 640, 400, g_p->fb, &g_bmi, DIB_RGB_COLORS, SRCCOPY);
         if (GetTickCount() < g_toast_until) {
             double k = dw / 640.0;
-            int tw = (int)(260 * k), th = (int)(26 * k);
+            double est = 24;   // 文字の幅の見積もり（全角 15、半角 7.5）で箱の幅を決める
+            for (wchar_t c : g_toast) est += c < 0x100 ? 7.5 : 15;
+            int tw = (int)(std::min(624.0, std::max(260.0, est)) * k), th = (int)(26 * k);
             RECT r = {dx + (int)(8 * k), dy + (int)(8 * k), dx + (int)(8 * k) + tw, dy + (int)(8 * k) + th};
             HBRUSH b = CreateSolidBrush(RGB(20, 20, 30)); FillRect(mem, &r, b); DeleteObject(b);
             draw_text(mem, r.left, r.top + (int)(5 * k), (int)(15 * k), RGB(255, 255, 255), g_toast, true, tw);
@@ -622,6 +701,7 @@ static void present(HDC dc) {
 }
 
 static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (iu_message(h, msg, wp, lp)) return 0;
     switch (msg) {
     case WM_CLOSE: DestroyWindow(h); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
@@ -656,6 +736,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             case VK_F11: if (first) menu_close(); return 0;
             case 'F': if (first) fd_menu(false); return 0;
             case 'E': if (first) fd_eject(); return 0;
+            case 'N': if (first) fd_next_disk(); return 0;
+            case 'P': if (first) fd_prev_disk(); return 0;
             default: return 0;
             }
             g_menu_note.clear();
@@ -688,6 +770,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (hit >= 0) { g_sel = hit; menu_decide(); }
             else if (hit == HIT_FD_INSERT) fd_menu(true);
             else if (hit == HIT_FD_EJECT) fd_eject();
+            else if (hit == HIT_FD_NEXT) fd_next_disk();
+            else if (hit == HIT_FD_PREV) fd_prev_disk();
             return 0;
         }
         if (!g_captured && g_p) { set_capture(true); return 0; }
@@ -748,7 +832,7 @@ static std::string guess_start(const std::wstring& dir) {
     if (!exes.empty()) return U(exes[0]);
     return "";
 }
-static void write_template_ini(const std::wstring& path, const std::string& start) {
+static void write_template_ini(const std::wstring& path, const std::string& start, char drive = 'A') {
     std::string t =
         "; PC98PLAYER.INI  -- このフォルダのゲームを PC98PLAYER.EXE で起動するための設定\r\n"
         "[PC98PLAYER]\r\n"
@@ -764,7 +848,7 @@ static void write_template_ini(const std::wstring& path, const std::string& star
         "; 仮想 CPU の速さ（MHz 相当）\r\n"
         "CpuMHz=16\r\n"
         "; ゲームのフォルダを何ドライブに見せるか\r\n"
-        "Drive=A\r\n"
+        "Drive=" + std::string(1, drive) + "\r\n"
         "; 音源ボード（86 / 26 / 0=なし）と割込み（3/10/12/13）\r\n"
         "SoundBoard=86\r\n"
         "SoundIRQ=12\r\n"
@@ -847,6 +931,119 @@ static bool load_ini_any(const std::wstring& path, Ini& ini) {
     return ok;
 }
 
+// ---- 最初に実行するファイルを選ぶ（INI を作るとき） ------------------------------------
+//  ゲームのフォルダを開いたファイル選択ダイアログ（*.* が対象。BAT/EXE/COM どれでも）。
+//  選んだファイルの、ゲームのフォルダからの相対パス（直下ならファイル名だけ）を返す。やめたら空
+static std::string choose_start(const std::wstring& dir, const std::string& guess, const std::wstring& title) {
+    std::wstring ud = upper(dir);
+    if (!ud.empty() && ud.back() != L'\\') ud += L'\\';
+    for (;;) {
+        wchar_t file[MAX_PATH] = L"";
+        if (!guess.empty()) lstrcpynW(file, W(guess).c_str(), MAX_PATH);
+        OPENFILENAMEW of = {};
+        of.lStructSize = sizeof(of);
+        of.lpstrFilter = L"すべてのファイル (*.*)\0*.*\0起動できるファイル (*.bat;*.exe;*.com)\0*.bat;*.exe;*.com\0";
+        of.nFilterIndex = 1;
+        of.lpstrFile = file; of.nMaxFile = MAX_PATH;
+        of.lpstrInitialDir = dir.c_str();
+        of.lpstrTitle = title.c_str();
+        of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameW(&of)) return "";
+        std::wstring f = file, uf = upper(f);
+        if (uf.compare(0, ud.size(), ud) == 0) return U(f.substr(ud.size()));
+        MessageBoxW(nullptr, (L"ゲームのフォルダの中のファイルを選んでください:\n" + dir).c_str(), L"PC98PLAYER", MB_ICONWARNING);
+    }
+}
+
+// ---- ハードディスクイメージの展開 --------------------------------------------------
+//  PC98PLAYER.EXE の第 1 引数に HDI / NHD / THD / HDD を渡すと、カレントフォルダへ中身を展開する。
+//  戻り値: 1 = 展開して起動する（*game_dir に展開先）, 0 = やめた／起動しない, -1 = 失敗
+// 展開・インストール先: カレントフォルダ。ただし Windows のフォルダやドライブの直下なら、
+// イメージの横に同じ名前のフォルダを作ってそこにする
+static std::wstring safe_dest(const std::wstring& image, std::wstring dest) {
+    std::wstring name = image.substr(image.find_last_of(L"\\/") + 1);
+    wchar_t windir[MAX_PATH] = L"";
+    GetWindowsDirectoryW(windir, MAX_PATH);
+    std::wstring ud = upper(dest), uw = upper(windir);
+    if (dest.size() <= 3 || (!uw.empty() && ud.compare(0, uw.size(), uw) == 0)) {
+        std::wstring base = name.substr(0, name.find_last_of(L'.'));
+        dest = image.substr(0, image.find_last_of(L"\\/")) + L"\\" + base;
+    }
+    return dest;
+}
+
+#include "install_ui.inc"
+
+static int extract_hd_image(const std::wstring& image, std::wstring dest, std::wstring* game_dir) {
+    std::wstring name = image.substr(image.find_last_of(L"\\/") + 1);
+    dest = safe_dest(image, dest);
+    hdimage::Info info; std::string err;
+    if (!hdimage::probe(U(image), &info, &err)) {
+        MessageBoxW(nullptr, (L"ハードディスクイメージを読めません:\n" + image + L"\n\n" + W(err)).c_str(), L"PC98PLAYER", MB_ICONERROR);
+        return -1;
+    }
+    wchar_t head[512];
+    swprintf(head, 512, L"「%ls」（%ls・MS-DOS の区画 %d 個）の中身を、次のフォルダへ展開します。\n\n%ls\n\n"
+                        L"同じ名前のファイルが既にあるときは上書きしません。よろしいですか？",
+             name.c_str(), W(info.format).c_str(), (int)info.parts.size(), dest.c_str());
+    if (MessageBoxW(nullptr, head, L"インストールアシスタント - ハードディスクイメージの展開", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+    CreateDirectoryW(dest.c_str(), nullptr);
+    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    hdimage::Result res;
+    bool ok = hdimage::extract(U(image), U(dest), &res, &err);
+    SetCursor(old);
+    if (!ok) {
+        MessageBoxW(nullptr, (L"展開できませんでした: " + W(err)).c_str(), L"PC98PLAYER", MB_ICONERROR);
+        return -1;
+    }
+    wchar_t sum[512];
+    swprintf(sum, 512, L"展開しました: ファイル %d 個・フォルダ %d 個（%.1f MB）", res.files, res.dirs, res.bytes / 1048576.0);
+    // 飛ばしたファイル・読めなかったもの・区画が複数あるときだけ、詳しい結果を先に見せる
+    if (res.skipped || res.errors || info.parts.size() > 1) {
+        std::wstring msg = sum;
+        if (res.skipped) msg += L"\n既にあったので飛ばしたファイル: " + std::to_wstring(res.skipped) + L" 個";
+        if (res.errors) msg += L"\n読めなかったもの: " + std::to_wstring(res.errors) + L" 個";
+        msg += L"\n";
+        for (size_t i = 0; i < res.notes.size() && i < 12; i++) msg += L"\n・" + W(res.notes[i]);
+        MessageBoxW(nullptr, msg.c_str(), L"PC98PLAYER", res.errors ? MB_ICONWARNING : MB_ICONINFORMATION);
+    }
+    // INI が無ければ、最初に実行するファイルを選んでもらって作る
+    std::wstring ini = dest + L"\\PC98PLAYER.INI";
+    if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        DWORD aa = GetFileAttributesW((dest + L"\\AUTOEXEC.BAT").c_str());
+        std::string guess = (aa != INVALID_FILE_ATTRIBUTES && !(aa & FILE_ATTRIBUTE_DIRECTORY)) ? "AUTOEXEC.BAT" : guess_start(dest);
+        std::string st = choose_start(dest, guess, std::wstring(sum) + L" ― 最初に実行するファイルを選んでください");
+        if (st.empty()) {
+            write_template_ini(ini, "");
+            MessageBoxW(nullptr, (L"PC98PLAYER.INI を作りました。INI の Start= に最初に実行するファイルを書いてから起動してください。\n\n" + ini).c_str(),
+                        L"PC98PLAYER", MB_ICONINFORMATION);
+            return 0;
+        }
+        write_template_ini(ini, st);
+    }
+    *game_dir = dest;
+    return 1;
+}
+
+static void create_main_window(HINSTANCE inst, int scale) {
+    WNDCLASSEXW wc = { sizeof(wc) };
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = wndproc;
+    wc.hInstance = inst;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+    wc.lpszClassName = L"PC98PLAYER";
+    RegisterClassExW(&wc);
+    int ww, wh;
+    window_size_for_scale(scale, &ww, &wh);
+    g_hwnd = CreateWindowExW(0, L"PC98PLAYER", g_title.c_str(), WS_OVERLAPPEDWINDOW,
+                             CW_USEDEFAULT, CW_USEDEFAULT, ww, wh, nullptr, nullptr, inst, nullptr);
+    memset(&g_bmi, 0, sizeof(g_bmi));
+    g_bmi.bmiHeader.biSize = sizeof(g_bmi.bmiHeader);
+    g_bmi.bmiHeader.biWidth = 640; g_bmi.bmiHeader.biHeight = -400;
+    g_bmi.bmiHeader.biPlanes = 1; g_bmi.bmiHeader.biBitCount = 32;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     SetProcessDPIAware();
     timeBeginPeriod(1);
@@ -861,7 +1058,45 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     };
     auto file_exists = [](const std::wstring& p) { DWORD a = GetFileAttributesW(p.c_str()); return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY); };
     std::wstring ini_path = dir + L"\\PC98PLAYER.INI";
-    if (argc >= 2 && argv[1][0] != L'-') {
+    bool hd_done = false;
+    // フロッピーイメージ（1 枚以上）: インストールの画面
+    std::vector<std::wstring> fd_args;
+    // 実機のフロッピードライブ（エクスプローラーからドライブをドロップすると "A:\" が来る）も同じ画面で
+    auto drive_arg = [](const std::wstring& a) -> std::wstring {
+        std::wstring u = upper(a);
+        if (u.size() >= 2 && u.size() <= 3 && u[1] == L':' && u[0] >= L'A' && u[0] <= L'Z' && (u.size() == 2 || u[2] == L'\\')) {
+            wchar_t root[4] = {u[0], L':', L'\\', 0};
+            if (GetDriveTypeW(root) == DRIVE_REMOVABLE) return std::wstring(L"FDD:") + u[0];
+        }
+        if (u == L"GW" || u.compare(0, 3, L"GW:") == 0 || u.compare(0, 4, L"FDD:") == 0) return a;
+        return L"";
+    };
+    bool dev_first = argc >= 2 && !drive_arg(argv[1]).empty();
+    if (dev_first) fd_args.push_back(drive_arg(argv[1]));
+    else for (int i = 1; i < argc; i++) {
+        std::wstring a = full_path(argv[i]);
+        if (argv[i][0] != L'-' && file_exists(a) && is_floppy_image_name(a)) fd_args.push_back(a);
+    }
+    if (dev_first) g_install_mode = true;
+    else if (argc >= 2 && !fd_args.empty() && is_floppy_image_name(argv[1])) {
+        std::sort(fd_args.begin(), fd_args.end(), [](const std::wstring& x, const std::wstring& y) { return lstrcmpiW(x.c_str(), y.c_str()) < 0; });
+        g_install_mode = true;
+    }
+    if (g_install_mode) {
+    } else if (argc >= 2 && argv[1][0] != L'-') {
+        std::wstring a = full_path(argv[1]);
+        DWORD attr = GetFileAttributesW(a.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY) && hdimage::is_hd_image(U(a))) {
+            // ハードディスクイメージ: カレントフォルダへ中身を展開して、そこをゲームのフォルダにする
+            int r = extract_hd_image(a, full_path(L"."), &dir);
+            if (r < 0) return 1;       // 失敗
+            if (r == 0) return 0;      // やめた／起動しない
+            ini_path = dir + L"\\PC98PLAYER.INI";
+            hd_done = true;
+        }
+    }
+    if (hd_done || g_install_mode) {
+    } else if (argc >= 2 && argv[1][0] != L'-') {
         // 引数: ゲームのフォルダ、または INI ファイル
         std::wstring a = full_path(argv[1]);
         DWORD attr = GetFileAttributesW(a.c_str());
@@ -899,6 +1134,38 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
         MessageBoxW(nullptr, (L"書き出しました: " + out).c_str(), L"PC98PLAYER", MB_ICONINFORMATION);
         return 0;
     }
+    Ini ini;
+    PlayerSettings ps;
+    if (g_install_mode) {
+        // フロッピーからのインストール: 画面でインストーラとドライブを選んでから動かす（INI は作らない）
+        dir = safe_dest(floppy::is_device_spec(U(fd_args[0])) ? exe_dir() + L"\\PC98GAME" : fd_args[0], full_path(L"."));
+        CreateDirectoryW(dir.c_str(), nullptr);
+        if (file_exists(dir + L"\\PC98PLAYER.INI")) load_ini_any(dir + L"\\PC98PLAYER.INI", ini);   // 音などの設定だけ借りる
+        player_settings_from_ini(ini, U(dir), &ps);
+        g_title = L"インストールアシスタント - PC98PLAYER";
+        create_main_window(inst, ps.scale);
+        ShowWindow(g_hwnd, show);
+        UpdateWindow(g_hwnd);
+        if (!install_ui_run(fd_args, dir)) return 0;
+        ps.cfg.drive = g_iu.hd;
+        ps.cfg.floppy_drive = g_iu.fd;
+        ps.cfg.floppy_image = U(g_iu.disks[g_iu.disk]);
+        ps.cfg.start = std::string(1, g_iu.fd) + ":\\" + g_iu.chosen;
+        ps.cfg.args = U(g_iu.args);
+        ps.cfg.current_drive = g_iu.cur_fd ? g_iu.fd : g_iu.hd;
+        ps.exit_on_end = false;
+        ps.title = "インストールアシスタント";
+        g_disk_list = g_iu.disks;
+        g_disk_index = g_iu.disk;
+        g_mouse_speed = ini.geti("PC98PLAYER.MOUSESPEED", 100);
+        g_middle_release = ini.geti("PC98PLAYER.MIDDLERELEASE", 1) != 0;
+        g_mouse_lock_disable = ini.geti("PC98PLAYER.MOUSELOCKDISABLE", 0) != 0;
+    } else {
+    if (GetFileAttributesW(ini_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        // INI が無い: 最初に実行するファイルを選んでもらう（やめたら従来どおり推測）
+        std::string st = choose_start(dir, guess_start(dir), L"PC98PLAYER.INI を作ります ― 最初に実行するファイルを選んでください");
+        if (!st.empty()) write_template_ini(ini_path, st);
+    }
     if (GetFileAttributesW(ini_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::string st = guess_start(dir);
         write_template_ini(ini_path, st);
@@ -908,7 +1175,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
         MessageBoxW(nullptr, msg.c_str(), L"PC98PLAYER", MB_ICONINFORMATION);
         if (st.empty()) return 1;
     }
-    Ini ini;
     load_ini_any(ini_path, ini);
     // Root=: ゲームのフォルダを INI とは別の場所にする（INI からの相対パス可）
     {
@@ -923,7 +1189,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
             else MessageBoxW(nullptr, (L"Root= のフォルダが見つかりません:\n" + cand + L"\n\nINI のあるフォルダで起動します。").c_str(), L"PC98PLAYER", MB_ICONWARNING);
         }
     }
-    PlayerSettings ps;
     player_settings_from_ini(ini, U(dir), &ps);
     if (ps.cfg.start.empty()) {
         // Start= が空: ゲームのフォルダから起動するファイルを推測して、それで起動する
@@ -949,6 +1214,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     g_pause_inactive = ini.geti("PC98PLAYER.PAUSEINACTIVE", 0) != 0;
     g_middle_release = ini.geti("PC98PLAYER.MIDDLERELEASE", 1) != 0;
     g_mouse_lock_disable = ini.geti("PC98PLAYER.MOUSELOCKDISABLE", 0) != 0;
+    }
 
     font_init(W(ps.font_name));
     FontSource fs; fs.kanji = cb_kanji; fs.ank = cb_ank; fs.narrow = cb_narrow; fs.user = nullptr;
@@ -957,22 +1223,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     g_title = ps.title.empty() ? W(ps.cfg.root.substr(ps.cfg.root.find_last_of("\\/") == std::string::npos ? 0 : ps.cfg.root.find_last_of("\\/") + 1)) : W(ps.title);
     g_title += L" - PC98PLAYER";
 
-    WNDCLASSEXW wc = { sizeof(wc) };
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = wndproc;
-    wc.hInstance = inst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
-    wc.lpszClassName = L"PC98PLAYER";
-    RegisterClassExW(&wc);
-    int ww, wh;
-    window_size_for_scale(ps.scale, &ww, &wh);
-    g_hwnd = CreateWindowExW(0, L"PC98PLAYER", g_title.c_str(), WS_OVERLAPPEDWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, ww, wh, nullptr, nullptr, inst, nullptr);
-    memset(&g_bmi, 0, sizeof(g_bmi));
-    g_bmi.bmiHeader.biSize = sizeof(g_bmi.bmiHeader);
-    g_bmi.bmiHeader.biWidth = 640; g_bmi.bmiHeader.biHeight = -400;
-    g_bmi.bmiHeader.biPlanes = 1; g_bmi.bmiHeader.biBitCount = 32;
+    if (!g_hwnd) create_main_window(inst, ps.scale);
+    else SetWindowTextW(g_hwnd, g_title.c_str());
 
     RAWINPUTDEVICE rid = {0x01, 0x02, 0, g_hwnd};
     RegisterRawInputDevices(&rid, 1, sizeof(rid));
@@ -1056,6 +1308,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
             if (g_p->m->quit == 2) {
                 MessageBoxW(g_hwnd, (L"エミュレーションを続けられなくなりました。\n" + W(g_p->m->status)).c_str(), L"PC98PLAYER", MB_ICONWARNING);
                 running = false;
+            } else if (g_install_mode) {
+                if (install_finished()) running = false;
             } else if (g_p->ps.exit_on_end) running = false;
         }
     }

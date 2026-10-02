@@ -181,6 +181,20 @@ struct Mouse {
     int      visible;
 };
 
+// INT 33h（マウスドライバ）の HLE の状態
+struct MouseDrv {
+    int      show;                 // 表示カウンタ（0 で表示、負で非表示。AX=1 で +1、AX=2 で -1）
+    uint16_t shape[32];            // カーソルの形: AND マスク 16 ワード + XOR マスク 16 ワード（AX=9）
+    int16_t  hot_x, hot_y;
+    uint16_t cb_mask, cb_off, cb_seg;   // ユーザのイベントハンドラ（AX=0Ch/14h）
+    uint16_t events;               // 溜まった出来事（bit0 移動, 1 左押す, 2 左離す, 3 右押す, 4 右離す）
+    uint8_t  hooked, in_cb;        // IRQ13（INT 15h）をつないでいる / ハンドラを呼んでいる最中
+    uint16_t old15_off, old15_seg;
+    uint16_t stub_off, ptr_off;    // ROM の割込みの入口、ハンドラの far ポインタの置き場所
+    int      mick_x, mick_y;       // 累計の移動量（ミッキー）
+    int      sens_x, sens_y, sens_d;
+};
+
 struct Machine {
     Cpu      cpu;
     uint8_t* ram;               // PC98_RAM_SIZE
@@ -198,6 +212,7 @@ struct Machine {
     std::vector<PcmSample> pcm_out;  // PCM86 の出力（フレームごとに Player が取り出す）
     std::vector<uint8_t> midi_out;   // ホストへ送る MIDI バイト列（フレームごとに取り出す）
     Mouse    mouse;
+    MouseDrv mdrv;
     Config   cfg;
 
     // 画面
@@ -319,6 +334,9 @@ bool ems_enabled(Machine* m);
 void dos_init(Machine* m);
 void dos_hle(Machine* m, uint8_t n);
 void shell_start(Machine* m, const std::string& cmdline);
+// INT DCh CL=0Ch/0Dh: ファンクションキー・編集キーに割り当てた文字列の取得／設定（DOS のコンソール入力で展開する）
+void dos_keytab_get(Machine* m, uint16_t ax, uint32_t addr);
+void dos_keytab_set(Machine* m, uint16_t ax, uint32_t addr);
 
 // 共通
 void set_cf(Machine* m, bool on);
@@ -350,6 +368,8 @@ enum {
     HLE_INT67      = 0x67,
     HLE_LIO        = 0xA0,   // 0xA0-0xAF: グラフィック LIO（INT A0h-AFh）
     HLE_XMS        = 0xE0,
+    HLE_MSIRQ      = 0xF0,   // マウスドライバの IRQ13: ユーザのイベントハンドラを呼ぶか決める
+    HLE_MSIRQ_END  = 0xF1,   // ハンドラから戻った
     HLE_SHELL      = 0xFD,   // シェル（バッチ）の次の行へ
     HLE_EXIT       = 0xFE,
     HLE_NOP        = 0xFF,

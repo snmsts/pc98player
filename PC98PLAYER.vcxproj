@@ -69,6 +69,7 @@
     <ClCompile Include="core\floppy.cpp" />
     <ClCompile Include="core\fdflux.cpp" />
     <ClCompile Include="core\fdreal.cpp" />
+    <ClCompile Include="core\hdimage.cpp" />
     <ClCompile Include="core\fatfs.cpp" />
     <ClCompile Include="core\gdcdraw.cpp" />
     <ClCompile Include="win32\main.cpp" />

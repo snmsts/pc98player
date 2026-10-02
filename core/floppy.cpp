@@ -19,6 +19,7 @@
 #include "hostfs.h"
 #include "machine.h"
 #include <string.h>
+#include <stdlib.h>
 #include <algorithm>
 #include "fdreal.h"
 
@@ -329,12 +330,17 @@ FloppyImage::~FloppyImage() { delete src; }
 FdTrack* FloppyImage::track(int cyl, int head) {
     int t = cyl * 2 + head;
     if (t < 0 || t >= MAX_TRACKS) return nullptr;
+    // 実機で読めなかったセクタ（file_off == -2）があるトラックは、使うたびにもう一度読みに行く（ゲームのやり直しに合わせる）
+    if (src && loaded[t]) {
+        for (auto& x : trk[t].secs) if (x.file_off == -2) { loaded[t] = false; break; }
+    }
     if (src && !loaded[t]) {
         FdTrack nt;
         if (src->fetch(cyl, head, nt)) { trk[t] = std::move(nt); loaded[t] = true; not_ready = false; }
         else {
             trk[t].secs.clear(); trk[t].diags.clear();
             std::string e = src->last_error();
+            if (!e.empty()) plog("[fd] C=%02X H=%02X を読めません: %s\n", cyl, head, e.c_str());
             not_ready = !e.empty();   // 理由があれば「ディスクが無い」等。空なら未フォーマットのトラック
             if (!not_ready) loaded[t] = true;
         }
@@ -360,6 +366,26 @@ bool FloppyImage::open_source(FdSource* s, const std::string& name, const std::s
     // 1024 バイト x 8 = PC-98 の 2HD（77 シリンダ）、512 x 18 = 1.44MB、512 x 15 = 2HC、512 x 8/9 = 2DD
     if (cylinders <= 0) cylinders = (n3 >= 8 && media == FD_2HD) ? 77 : 80;
     setup_geometry();
+    return true;
+}
+
+bool FloppyImage::check_media_change() {
+    if (!src) return false;
+    if (!loaded[0]) return false;   // まだ読んでいない（次に使うときに読む）
+    FdTrack nt;
+    bool ok = src->fetch(0, 0, nt);
+    bool same = ok && nt.secs.size() == trk[0].secs.size();
+    if (same) {
+        for (size_t i = 0; i < nt.secs.size() && same; i++) {
+            const FdSector &a = nt.secs[i], &b = trk[0].secs[i];
+            same = a.c == b.c && a.h == b.h && a.r == b.r && a.n == b.n && a.status == b.status && a.data == b.data;
+        }
+    }
+    if (same) return false;
+    for (int t = 0; t < MAX_TRACKS; t++) { loaded[t] = false; trk[t].secs.clear(); trk[t].diags.clear(); trk[t].rot = 0; }
+    if (ok) { trk[0] = std::move(nt); loaded[0] = true; not_ready = false; setup_geometry(); }
+    else not_ready = !src->last_error().empty();
+    wprot = !src->writable() || floppy::force_wprot();   // 新しいディスクの書き込み禁止のつまみ
     return true;
 }
 
@@ -430,6 +456,9 @@ static FloppyImage* s_img = nullptr;
 static char s_letter = 'B';
 static uint32_t s_changes = 0;
 static int s_head_pos[4];          // 各ユニットのヘッド位置（シリンダ）
+static bool s_force_wp = false;
+void set_force_wprot(bool on) { s_force_wp = on; if (s_img && on) s_img->wprot = true; }
+bool force_wprot() { return s_force_wp; }
 
 bool insert(const std::string& path, std::string* err) {
     FloppyImage* im = new FloppyImage();
@@ -441,6 +470,7 @@ bool insert(const std::string& path, std::string* err) {
         std::string fmt = fdreal_format_name(path);
         if (!im->open_source(src, path, fmt, err)) { delete im; return false; }
     } else if (!im->load(path, err)) { delete im; return false; }
+    if (s_force_wp) im->wprot = true;
     delete s_img;
     s_img = im;
     s_changes++;
@@ -452,6 +482,21 @@ FloppyImage* image() { return s_img; }
 char drive_letter() { return s_letter; }
 void set_drive_letter(char c) { if (c >= 'a' && c <= 'z') c = (char)(c - 32); s_letter = (c >= 'A' && c <= 'Z') ? c : 0; }
 uint32_t change_count() { return s_changes; }
+static uint32_t s_last_access = 0;
+void poll_change() {
+    if (!s_img || !s_img->src) return;
+    uint32_t now = fdreal_now_ms();
+    uint32_t idle = now - s_last_access;
+    s_last_access = now;
+    static int thr = -1;
+    if (thr < 0) { const char* e = getenv("PC98PLAYER_FD_IDLE_MS"); thr = e ? atoi(e) : 1500; }   // テスト用に変えられる
+    if ((int)idle < thr) return;   // 続けて使っている間は確かめない（入れ替えは、止まっている間に起きる）
+    if (s_img->check_media_change()) {
+        s_changes++;
+        plog("[fd] ディスクが入れ替わったので読み直します%s\n", s_img->not_ready ? "（今は入っていません）" : "");
+    }
+    s_last_access = fdreal_now_ms();
+}
 void media_changed() { if (s_img) s_img->refetch(); s_changes++; fatfs::reset(); }
 void idle() { if (s_img && s_img->src) s_img->src->idle(fdreal_now_ms()); }
 
@@ -473,11 +518,13 @@ void bios_int1b(Machine* m) {
     auto AH = [&]() { return (uint8_t)(c->r[EAX] >> 8); };
     uint8_t al = (uint8_t)c->r[EAX];
     auto ret = [&](uint8_t st) {
+        if (m->cfg.trace && st != 0x00) plog("[fd]   → 結果 %02Xh\n", st);
         c->r[EAX] = (c->r[EAX] & 0xFFFF00FFu) | ((uint32_t)st << 8);
         set_cf(m, st >= 0x20);   // 00h 正常 / 10h 正常（デリーテッド検出・書き込み禁止の状態）
     };
     uint8_t cmd = AH() & 0x0F;
     int unit = al & 3;
+    if (unit == 0) poll_change();
     FloppyImage* im = (unit == 0) ? s_img : nullptr;
     if (m->cfg.trace) plog("[fd] INT1B AH=%02X AL=%02X C=%02X H=%02X R=%02X N=%02X BX=%04X\n",
                            AH(), al, (unsigned)(uint8_t)c->r[ECX], (unsigned)(uint8_t)(c->r[EDX] >> 8),

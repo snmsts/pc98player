@@ -69,6 +69,7 @@ void reset() { V = Vol(); }
 static FloppyImage* img() { return floppy::image(); }
 
 static bool mount() {
+    floppy::poll_change();   // 実機のディスクが入れ替わっていれば、ここで変更回数が増えて読み直す
     FloppyImage* im = img();
     if (!im) { V.ok = false; return false; }
     if (V.ok && V.change == floppy::change_count()) return true;

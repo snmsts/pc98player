@@ -80,6 +80,7 @@ public:
     bool not_ready = false;
     bool open_source(FdSource* s, const std::string& name, const std::string& fmt, std::string* err);
     void refetch();             // 読み直す（ディスクを入れ替えた）
+    bool check_media_change();  // 実機: トラック 0 を読み直して、ディスクが替わっていたら覚えている中身を捨てる
     // 全トラックを読み（実機なら読みに行き）D88 で書き出す
     bool save_d88(const std::string& out_path, std::string* err);
     FdSector* find(int cyl, int head, uint8_t c, uint8_t h, uint8_t r, uint8_t n);
@@ -119,9 +120,14 @@ namespace floppy {
     // 実機のドライブを表す名前か（"FDD:A" "\\.\A:" "GW" "GW:COM5" 等）。ファイル名ではないのでパスを付けない
     bool is_device_spec(const std::string& name);
     void media_changed();                 // 実機のディスクを入れ替えた（読み直す）
+    // 実機: しばらく触っていなかったら、ディスクが入れ替わっていないか確かめる（DOS・BIOS の入口で呼ぶ）
+    void poll_change();
     void idle();                          // 1 フレームごとに呼ぶ（実機のモーターを止める等）
     // Greaseweazle の設定（INI: GWDrive / GWRevs）
     void set_gw_options(const std::string& drive, int revs);
+    // 入れるディスクを必ず書き込み禁止にする（インストールの支援で、インストーラが「ライトプロテクトにして下さい」と言うため）
+    void set_force_wprot(bool on);
+    bool force_wprot();
 }
 
 // ---- フラックス（磁気信号）の復調（fdflux.cpp） -----------------------------------------
