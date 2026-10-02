@@ -35,14 +35,22 @@ void video_render(Machine* m, uint32_t* out) {
     uint32_t len1 = (uint32_t)((m->gdcs.pram[2] >> 4) | ((m->gdcs.pram[3] & 0x3F) << 4));
     uint32_t sad2 = (uint32_t)(m->gdcs.pram[4] | (m->gdcs.pram[5] << 8) | ((m->gdcs.pram[6] & 3) << 16));
     int zoom = ((m->gdcs.zoom >> 4) & 15) + 1;   // ZOOM の上位 4bit が表示の倍率（下位は描画用）
-    bool line200 = m->gfx_200 || zoom >= 2;
-    int vlines = line200 ? 200 : 400;
-    if (len1 == 0 || len1 > (uint32_t)vlines) len1 = (uint32_t)vlines;
+    // 1 本の VRAM の行を何本の走査線で見せるか: GDC の CSRFORM の「1 行の走査線数」（200 ライン表示は 2）、
+    // ZOOM、ポート 68h の 200 ライン指定のうち大きいもの
+    int rep = (m->gdcs.csrform[0] & 0x1F) + 1;
+    if (rep > 4) rep = 1;                       // グラフィックでは 1〜2 のはず。変な値は無視
+    if (zoom > rep) rep = zoom;
+    if (m->gfx_200 && rep < 2) rep = 2;
+    // 1 行の大きさ: GDC の PITCH（ワード数）。横に広い仮想画面を作って SAD で横スクロールするゲームがある
+    //（ヴァリアブル・ジオ 2 の対戦画面は 64 ワード = 1024 ドット幅）。表示するのは先頭の 40 ワード（640 ドット）
+    uint32_t stride = (uint32_t)(m->gdcs.pitch >= 40 ? m->gdcs.pitch : 40) * 2;
+    // LEN は走査線の本数（400 ライン基準）
+    if (len1 == 0 || len1 > 400) len1 = 400;
     for (int y = 0; y < 400; y++) {
         uint32_t* o = out + y * 640;
         if (!gon) { for (int x = 0; x < 640; x++) o[x] = 0xFF000000u; continue; }
-        int vy = line200 ? (y >> 1) : y;
-        uint32_t addr = (uint32_t)vy < len1 ? (sad1 * 2 + (uint32_t)vy * 80) : (sad2 * 2 + (uint32_t)(vy - len1) * 80);
+        uint32_t addr = (uint32_t)y < len1 ? (sad1 * 2 + (uint32_t)(y / rep) * stride)
+                                            : (sad2 * 2 + (uint32_t)((y - (int)len1) / rep) * stride);
         for (int bx = 0; bx < 80; bx++) {
             uint32_t a = (addr + bx) & 0x7FFF;
             uint8_t b = pl[0][a], r = pl[1][a], g = pl[2][a], e = m->analog ? pl[3][a] : 0;

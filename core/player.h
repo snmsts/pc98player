@@ -68,6 +68,11 @@ struct Player {
     // スナップショットをメモリ上で取る／戻す（ロード失敗時の巻き戻しにも使う）
     void snapshot(std::vector<uint8_t>& out);
     bool restore(const uint8_t* data, size_t len);
-    void run_frame(bool render_video = true);
+    // render_audio=false: 音を合成しない（早送り用。レジスタへの書き込みだけ音源へ渡す）
+    void run_frame(bool render_video = true, bool render_audio = true);
     void shutdown();
+    // PC-98 を起動し直す（電源を入れ直したのと同じ。入っているフロッピーはそのまま）
+    bool reboot(std::string* err);
+    // 設定を差し替えて起動し直す（INI の読み直し用。フロッピーは s.cfg.floppy_image のとおり）
+    bool reboot(const PlayerSettings& s, std::string* err);
 };

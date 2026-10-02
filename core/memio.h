@@ -10,6 +10,9 @@ struct Machine;
 
 extern uint8_t* g_ram;            // 高速パス用（Machine が設定）
 extern uint32_t g_addr_mask;      // A20 マスク（0xFFFFF または 0x10FFFF 付近を許すため 0x1FFFFF）
+// 「外に影響する（または外から値が変わりうる）アクセス」の回数。メモリへの書き込み・I/O・HLE トラップ・
+// VRAM/ROM など RAM 以外の読み出しで増える。CPU の空回り（割込み待ちのループ）を見分けるのに使う
+extern uint32_t g_side_fx;
 
 uint8_t  mem_rb_slow(Machine* m, uint32_t a);
 void     mem_wb_slow(Machine* m, uint32_t a, uint8_t v);
@@ -35,7 +38,8 @@ static inline uint8_t mem_rb(Machine* m, uint32_t a) {
 }
 static inline void mem_wb(Machine* m, uint32_t a, uint8_t v) {
     a = lin_mask(a);
-    if (a < 0xA0000u) { g_ram[a] = v; return; }
+    if (a < 0xA0000u) { if (g_ram[a] != v) { g_ram[a] = v; g_side_fx++; } return; }   // 同じ値の書き込みは影響なし
+    g_side_fx++;
     mem_wb_slow(m, a, v);
 }
 static inline uint16_t mem_rw(Machine* m, uint32_t a) {
@@ -45,7 +49,11 @@ static inline uint16_t mem_rw(Machine* m, uint32_t a) {
 }
 static inline void mem_ww(Machine* m, uint32_t a, uint16_t v) {
     uint32_t b = lin_mask(a);
-    if (b < 0x9FFFFu) { g_ram[b] = (uint8_t)v; g_ram[b + 1] = (uint8_t)(v >> 8); return; }
+    if (b < 0x9FFFFu) {
+        if (g_ram[b] != (uint8_t)v || g_ram[b + 1] != (uint8_t)(v >> 8)) { g_ram[b] = (uint8_t)v; g_ram[b + 1] = (uint8_t)(v >> 8); g_side_fx++; }
+        return;
+    }
+    g_side_fx++;
     mem_ww_slow(m, a, v);
 }
 static inline uint32_t mem_rd(Machine* m, uint32_t a) {

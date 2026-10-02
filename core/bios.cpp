@@ -371,17 +371,25 @@ static void int18(Machine* m) {
     case 0x13: m->gdcm.ead = (uint32_t)(DX(m) >> 1); return;
     case 0x14: {   // フォント読み出し
         uint16_t code = DX(m);
+        { static int n = 0; if (m->cfg.trace && n < 400) { n++; { uint32_t sp = ((uint32_t)m->cpu.sr[SS_] << 4) + (uint16_t)m->cpu.r[ESP]; plog("[bios] INT18 AH=14 DX=%04X → %04X:%04X  from %04X:%04X\n", code, BX(m), CX(m), m->ram[sp + 2] | (m->ram[sp + 3] << 8), m->ram[sp] | (m->ram[sp + 1] << 8)); } } }
         uint32_t buf = lin(BX(m), CX(m));
-        if ((code & 0xFF00) == 0 || (code & 0xFF00) == 0x8000) {
+        // バッファの先頭 2 バイトは「縦の大きさ（8 ドット単位）」「横の大きさ（8 ドット単位）」の順
+        //（ワードとして読むと 横*256+縦。全角 0202h、半角 0102h、8x8 は 0101h）。ゲームによっては 2 バイト目で幅を判断する
+        uint8_t hi = (uint8_t)(code >> 8);
+        if (hi == 0x00) {                    // 8x8 の半角（グラフィック用の小さな文字）: 8x16 の字形を縦に半分にしたもの
             const uint8_t* g = font_get_ank((uint8_t)code);
-            mem_wb(m, buf, 1); mem_wb(m, buf + 1, 2);
+            mem_wb(m, buf, 1); mem_wb(m, buf + 1, 1);
+            for (int i = 0; i < 8; i++) mem_wb(m, buf + 2 + i, (uint8_t)(g[i * 2] | g[i * 2 + 1]));
+        } else if (hi == 0x80) {             // 8x16 の半角
+            const uint8_t* g = font_get_ank((uint8_t)code);
+            mem_wb(m, buf, 2); mem_wb(m, buf + 1, 1);
             for (int i = 0; i < 16; i++) mem_wb(m, buf + 2 + i, g[i]);
         } else {
             uint16_t jis = code & 0x7F7F;
             const uint8_t* g = font_get_kanji(jis);
             uint8_t row = (uint8_t)(jis >> 8);
-            if (row >= 0x29 && row <= 0x2B) {
-                mem_wb(m, buf, 1); mem_wb(m, buf + 1, 2);
+            if (row >= 0x29 && row <= 0x2B) {   // 半角の漢字 ROM（8x16）
+                mem_wb(m, buf, 2); mem_wb(m, buf + 1, 1);
                 for (int i = 0; i < 16; i++) mem_wb(m, buf + 2 + i, g[i * 2]);
             } else {
                 mem_wb(m, buf, 2); mem_wb(m, buf + 1, 2);
@@ -753,6 +761,92 @@ void bios_init(Machine* m) {
     lio_init(m);
     // ROM の識別に使われることがある領域
     r[0xFFFFE] = 0xFE;
+}
+
+// ---- ブートモード（フロッピーの IPL から起動する） ---------------------------------
+//  PC-98 の起動 ROM と同じく、ユニット 0 の C=0 H=0 R=1 から IPL を読み込んで実行を始める。
+//   ・まず MFM（倍密度）で ID を探し、無ければ FM（単密度）で探す
+//   ・MFM で N≧1 なら 1024 バイトを 1FC0:0000 へ、FM（N88-BASIC 形式など）や N=0 なら 512 バイトを 1FE0:0000 へ
+//  MS-DOS は用意しない。BIOS（INT 18h・1Bh・1Ch など）だけで動くディスク向け。
+//  ROM の N88-BASIC は持っていないので、ROM の領域を「踏んだら止まる」命令で埋めておき、
+//  そこへ飛び込んできたら（＝BASIC を使うソフト）知らせて止める。
+static const uint32_t k_basic_lo = 0xE8000, k_basic_hi = 0xFD000;   // N88-BASIC(86) の ROM のあたり
+static const uint32_t k_rom_hi = 0xFFFF0;
+static uint32_t s_rom_used_lo, s_rom_used_hi;                          // 自前の入口（スタブ）を置いた範囲
+static bool rom_fill_area(uint32_t a) {
+    if (a < k_basic_lo || a >= k_rom_hi) return false;
+    if (a >= s_rom_used_lo && a < s_rom_used_hi) return false;
+    if (a >= 0xF9900 && a < 0xF9A00) return false;                    // LIO の入口
+    return true;
+}
+bool bios_rom_trap(Machine* m) {
+    uint32_t a = ((uint32_t)m->cpu.op_cs << 4) + m->cpu.op_ip;
+    a &= 0xFFFFF;
+    if (!rom_fill_area(a)) return false;
+    plog("[boot] ROM の %05X へ飛び込みました（%04X:%04X）\n", a, m->cpu.op_cs, m->cpu.op_ip);
+    if (a < k_basic_hi) {
+        m->status = "このソフトをプレイするにはPC98実機またはそのROMデータを搭載した仮想マシンが必要です";
+        m->quit = 3;
+    } else {
+        char b[160];
+        snprintf(b, sizeof(b), "ソフトが BIOS の ROM（%05X）を直接呼び出しました。PC98PLAYER はこの呼び出し方に対応していません。", a);
+        m->status = b;
+        m->quit = 2;
+    }
+    m->cpu.halted = 1;
+    return true;
+}
+
+bool bios_boot_fd(Machine* m, std::string* why) {
+    uint8_t* r = m->ram;
+    // ROM の空き（自前の入口・LIO 以外）を「HLE 命令」で埋める。どこから実行しても F1 xx で止まる
+    s_rom_used_lo = (uint32_t)ROMSEG << 4;
+    s_rom_used_hi = s_rom_used_lo + s_stub_ptr + 16;
+    for (uint32_t a = k_basic_lo; a < k_rom_hi; a++) if (rom_fill_area(a)) r[a] = 0xF1;
+    r[0x55C] = 0x03;               // 1MB の FDD がユニット 0・1 に付いている
+    r[0x55D] = 0x00;               // ハードディスクは無し
+    r[0x584] = 0x90;               // 起動したドライブ（DA/UA）: 1MB FDD のユニット 0
+    r[0x712] = 0; r[0x71D] = 0; r[0x714] = 0;
+    FloppyImage* im = floppy::image_unit(0);
+    if (!im) { if (why) *why = "1 台目のドライブにフロッピーが入っていません"; return false; }
+    FdTrack* t = im->track(0, 0);
+    const FdSector* id = nullptr;
+    if (t) for (auto& x : t->secs) if (!x.fm && x.c == 0 && x.h == 0 && x.r == 1) { id = &x; break; }
+    if (!id && t) for (auto& x : t->secs) if (x.fm && x.c == 0 && x.h == 0 && x.r == 1) { id = &x; break; }
+    if (!id) { if (why) *why = "起動用のセクタ（トラック 0 の 1 番）がありません"; return false; }
+    bool fm = id->fm;
+    uint8_t N = id->n;
+    uint32_t pos = 0x1FC00, remain = 0x400;
+    if (!N || fm || im->media == FD_144) { pos = 0x1FE00; remain = 0x200; }
+    uint16_t seg = (uint16_t)(pos >> 4);
+    // 中身がすべて同じ値（データ用のディスク・未使用）なら、起動できるディスクではない
+    {
+        bool same = true;
+        for (size_t i = 1; i < id->data.size() && same; i++) same = id->data[i] == id->data[0];
+        if (same) { if (why) *why = "起動ディスクではありません（起動用のセクタが空です）"; return false; }
+    }
+    for (uint8_t R = 1; remain > 0; R++) {
+        const FdSector* s = nullptr;
+        for (auto& x : t->secs) if (x.c == 0 && x.h == 0 && x.r == R && x.n == N && x.fm == fm) { s = &x; break; }
+        if (!s) break;
+        uint32_t size = 128u << (N < 3 ? N : 3);
+        uint32_t n = remain < size ? remain : size;
+        for (uint32_t i = 0; i < n; i++) r[pos + i] = i < s->data.size() ? s->data[i] : 0;
+        pos += n; remain -= n;
+    }
+    plog("[boot] IPL を %04X:0000 へ読み込みました（%s, N=%d, %s）\n", seg, fm ? "FM" : "MFM", N, im->path.c_str());
+    // PIC の初期マスク（キーボードとスレーブ連結だけ開ける）
+    m->pic[0].imr = 0x7D;
+    m->pic[1].imr = 0xFF;
+    pic_update_hint(m);
+    Cpu* c = &m->cpu;
+    for (int i = 0; i < 8; i++) c->r[i] = 0;
+    c->r[ESP] = 0x0000;
+    c->sr[CS_] = seg; c->sr[DS_] = 0; c->sr[ES_] = 0; c->sr[SS_] = 0x1FC0;
+    c->ip = 0;
+    c->fl |= FL_IF;
+    c->r[EAX] = 0x0090;            // AL = 起動したドライブ
+    return true;
 }
 
 // ---- ステートセーブ ----------------------------------------------------------

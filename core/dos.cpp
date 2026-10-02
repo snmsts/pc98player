@@ -104,6 +104,7 @@ static uint16_t s_retcode;
 static uint16_t s_last_err;
 static std::string s_cwd;      // ゲスト側のカレント（先頭の \ なし、大文字）。ゲームのドライブ
 static std::string s_fdcwd;    // フロッピーのドライブのカレント
+static std::string s_fdcwd2;   // 2 台目のフロッピーのドライブのカレント
 static char s_curdrv;          // カレントドライブ（0 = ゲームのドライブ）
 static char s_sg_drive;        // 直前に split_guest が解いたパスのドライブ
 static uint32_t s_fd_change = 0xFFFFFFFFu;
@@ -192,8 +193,8 @@ static bool valid83(const std::string& name) {
 static uint16_t hdd_free_clusters(Machine* m) { return (uint16_t)(m->cfg.free_mb * 64); }
 static uint16_t hdd_total_clusters(Machine* m) { uint32_t t = (uint32_t)m->cfg.free_mb * 64 + 2048; if (t < 8192) t = 8192; if (t > 0xFFF0) t = 0xFFF0; return (uint16_t)t; }
 static char cur_drive(Machine* m) { return s_curdrv ? s_curdrv : m->cfg.drive; }
-static bool drive_valid(Machine* m, char d) { return d == m->cfg.drive || (d == floppy::drive_letter() && d); }
-static std::string& cwd_of(Machine* m, char d) { return d == m->cfg.drive ? s_cwd : s_fdcwd; }
+static bool drive_valid(Machine* m, char d) { return d == m->cfg.drive || floppy::unit_of_letter(d) >= 0; }
+static std::string& cwd_of(Machine* m, char d) { return d == m->cfg.drive ? s_cwd : floppy::unit_of_letter(d) == 1 ? s_fdcwd2 : s_fdcwd; }
 static const std::vector<HostDirEntry>& dir_list(const std::string& hostdir) {
     if (s_fd_change != floppy::change_count()) { s_fd_change = floppy::change_count(); s_dircache.clear(); }
     auto it = s_dircache.find(hostdir);
@@ -253,6 +254,7 @@ static bool split_guest(const std::string& in, std::vector<std::string>& comps, 
 // ゲストのパスをホストのパスへ。存在しない最後の要素は大文字のまま付ける。
 static std::string drive_root(Machine* m, char d) {
     if (d == m->cfg.drive || !d) return m->cfg.root;
+    if (d == floppy::drive_letter() && !floppy::folder().empty()) return floppy::folder();   // フォルダを入れたフロッピー
     return fatfs::root_path(d);   // フロッピー（それ以外のドライブ名は何も無い扱い）
 }
 static std::string host_of(Machine* m, const std::vector<std::string>& comps, size_t upto, bool* all_exist) {
@@ -481,6 +483,38 @@ static uint8_t* keytab_entry(uint16_t ax, int* len) {
     if (ax >= 0x15 && ax <= 0x1F) { *len = 6; return s_ekey[ax - 0x15]; }
     *len = 0; return nullptr;
 }
+void dos_game_blocks(Machine* m, std::vector<DosMemBlock>& out) {
+    out.clear();
+    if (m->cfg.boot_fd) return;   // ブートモード: MS-DOS が無いので、ゲームのブロックは分からない（全体を対象にする）
+    // 実行中のプログラムから親をたどる（シェルの手前まで）
+    std::vector<uint16_t> chain;
+    uint16_t p = s_psp;
+    for (int i = 0; i < 16 && p && p != s_shell_psp; i++) {
+        if (std::find(chain.begin(), chain.end(), p) != chain.end()) break;
+        chain.push_back(p);
+        p = rw(m, lin(p, 0x16));
+    }
+    if (chain.empty()) return;
+    uint16_t s = first_mcb(m);
+    for (int n = 0; n < 4096; n++) {
+        uint8_t t = mcb_type(m, s);
+        if (t != 'M' && t != 'Z') break;
+        uint16_t own = mcb_owner(m, s), sz = mcb_size(m, s);
+        if (own && std::find(chain.begin(), chain.end(), own) != chain.end() && sz) {
+            uint32_t st = ((uint32_t)s + 1) << 4, len = (uint32_t)sz << 4;
+            // 名前: そのブロックの持ち主（PSP の直前の MCB）の名前
+            std::string nm;
+            for (int i = 0; i < 8; i++) { uint8_t c = m->ram[lin((uint16_t)(own - 1), 8 + i)]; if (!c) break; nm.push_back((char)c); }
+            if (!out.empty() && out.back().start + out.back().len == st && out.back().name == nm) out.back().len += len;
+            else out.push_back({st, len, nm});
+        }
+        if (t == 'Z') break;
+        uint32_t next = (uint32_t)s + sz + 1;
+        if (next >= 0xA000) break;
+        s = (uint16_t)next;
+    }
+}
+
 void dos_keytab_get(Machine* m, uint16_t ax, uint32_t a) {
     if (!s_keytab_init) keytab_default();
     if (ax == 0x0000 || ax == 0x00FF) {   // 全部（386 バイト）
@@ -783,7 +817,9 @@ static void terminate(Machine* m, uint8_t code, int type, uint16_t keep) {
     }
     s_retcode = (uint16_t)(code | (type << 8));
     s_psp = parent;
-    if (!s_frames.empty() && s_frames.back().child_psp == psp) {
+    // EXEC した子そのもの、または子が AH=55h で作った「身代わり」の PSP（親が同じ）が終わったら、EXEC の呼び出し元へ戻る
+    //（CSTMOUSE.BIN などの、自分を読み込み直して高い位置へ移すローダ）
+    if (!s_frames.empty() && (s_frames.back().child_psp == psp || s_frames.back().parent_psp == parent)) {
         ExecFrame f = s_frames.back();
         s_frames.pop_back();
         Cpu* c = &m->cpu;
@@ -859,7 +895,7 @@ static void dos_find_first(Machine* m) {
     if (attr == 0x08) {
         // ボリュームラベル（属性が 08h だけのとき）: フロッピーのドライブなら円盤のラベルを返す（キーディスクの確認に使うゲームがある）
         std::string lab; uint16_t ld = 0, lt = 0;
-        if (s_sg_drive && s_sg_drive == floppy::drive_letter() && fatfs::volume_label(&lab, &ld, &lt)) {
+        if (s_sg_drive && floppy::unit_of_letter(s_sg_drive) >= 0 && fatfs::volume_label_drive(s_sg_drive, &lab, &ld, &lt)) {
             uint32_t d = lin(s_dta_seg, s_dta_off);
             mem_wb(m, d + 0, 0xA5); mem_wb(m, d + 1, 0x5A);
             ww(m, d + 2, 0xFFFF); ww(m, d + 4, 0);
@@ -1240,6 +1276,7 @@ static void dos_exec(Machine* m) {
         bool exists; std::string host = guest_to_host(m, name, &exists, nullptr, nullptr);
         std::vector<uint8_t> data;
         if (!exists || !read_host_file(host, data)) { dos_error(m, 2); return; }
+        if (m->cfg.trace) plog("[dos] オーバーレイ読み込み %s → %04X（再配置 %04X）\n", name.c_str(), seg, reloc);
         if (data.size() >= 0x1C && data[0] == 'M' && data[1] == 'Z') {
             uint16_t cblp = (uint16_t)(data[2] | (data[3] << 8)), cp = (uint16_t)(data[4] | (data[5] << 8));
             uint16_t crlc = (uint16_t)(data[6] | (data[7] << 8)), hdr = (uint16_t)(data[8] | (data[9] << 8));
@@ -1422,9 +1459,12 @@ static void int21(Machine* m) {
     case 0x36: {
         char d = DL(m) ? (char)('A' + DL(m) - 1) : cur_drive(m);
         if (!drive_valid(m, d)) { SETAX(m, 0xFFFF); return; }
+        if (d == floppy::drive_letter() && !floppy::folder().empty()) {   // フォルダのフロッピー: 1.25MB の 2HD らしく見せる
+            SETAX(m, 1); SETBX(m, 600); SETCX(m, 1024); SETDX(m, 1221); return;
+        }
         if (d != m->cfg.drive) {
             uint32_t spc, bps, fr, tot;
-            if (!fatfs::free_space(&spc, &bps, &fr, &tot)) { SETAX(m, 0xFFFF); return; }
+            if (!fatfs::free_space_drive(d, &spc, &bps, &fr, &tot)) { SETAX(m, 0xFFFF); return; }
             SETAX(m, (uint16_t)spc); SETBX(m, (uint16_t)fr); SETCX(m, (uint16_t)bps); SETDX(m, (uint16_t)tot); return;
         }
         // ゲームのドライブ: 実際のディスクの大きさではなく、当時のハードディスクらしい大きさを見せる
@@ -1543,7 +1583,7 @@ static void int21(Machine* m) {
         uint16_t maxp = 0;
         int e = mem_resize(m, ES(m), BX(m), &maxp);
         if (e) { SETBX(m, maxp); dos_error(m, (uint16_t)e); return; }
-        if (ES(m) == s_psp) ww(m, lin(s_psp, 2), (uint16_t)(s_psp + BX(m)));
+        // 実機の DOS は PSP の「メモリの終わり」（PSP:2）を書き換えない（ここを見て子に渡すローダがある）
         dos_ok(m); return; }
     case 0x4B: dos_exec(m); return;
     case 0x4C: terminate(m, AL(m), 0, 0); return;
@@ -1551,6 +1591,28 @@ static void int21(Machine* m) {
     case 0x4E: dos_find_first(m); return;
     case 0x4F: dos_find_next(m); return;
     case 0x50: s_psp = BX(m); return;
+    case 0x26:     // 新しい PSP を作る（今の PSP を写す。ハンドルは複製しない。今の PSP は変えない）
+    case 0x55: {   // 子の PSP を作る（DX=セグメント, SI=メモリの終わり。ハンドルを継承し、今の PSP を DX にする）
+        uint16_t np = DX(m);
+        uint32_t src = lin(s_psp, 0), dst = lin(np, 0);
+        if (src != dst) for (int i = 0; i < 0x100; i++) mem_wb(m, dst + i, mem_rb(m, src + i));
+        if (AH(m) == 0x26) {
+            ww(m, dst + 2, rw(m, lin(s_psp, 2)));
+        } else {
+            ww(m, dst + 2, SI(m));
+            ww(m, dst + 0x16, s_psp);
+            for (int i = 0; i < 20; i++) mem_wb(m, dst + 0x18 + i, 0xFF);
+            ww(m, dst + 0x32, 20); ww(m, dst + 0x34, 0x18); ww(m, dst + 0x36, np);
+            ww(m, dst + 0x38, 0xFFFF); ww(m, dst + 0x3A, 0xFFFF);
+            inherit_handles(m, s_psp, np);
+        }
+        for (int i = 0; i < 3; i++) {   // INT 22h/23h/24h の今のベクタ
+            ww(m, dst + 0x0A + i * 4, rw(m, (0x22 + i) * 4));
+            ww(m, dst + 0x0C + i * 4, rw(m, (0x22 + i) * 4 + 2));
+        }
+        if (m->cfg.trace) plog("[dos] PSP を作りました: %04X（元 %04X, AH=%02X, 終わり %04X）\n", np, s_psp, AH(m), rw(m, dst + 2));
+        if (AH(m) == 0x55) { s_psp = np; SETAL(m, 0xF0); }
+        return; }
     case 0x51: case 0x62: SETBX(m, s_psp); return;
     case 0x52: c->sr[ES_] = DOSSEG; SETBX(m, D_LOL); return;
     case 0x54: SETAL(m, s_verify); return;
@@ -1787,7 +1849,7 @@ static bool run_command(Machine* m, const std::string& cmdline) {
         line = trim(r);
     }
     if (line.empty()) return false;
-    size_t sp = line.find_first_of(" \t/");
+    size_t sp = line.find_first_of(" \t/=");   // 「path=a:\」のように = で続ける書き方もある
     std::string cmd = upper_dbcs(sp == std::string::npos ? line : line.substr(0, sp));
     std::string rest = sp == std::string::npos ? "" : line.substr(sp);
     std::string arg = trim(rest);
@@ -2210,8 +2272,9 @@ void dos_hle(Machine* m, uint8_t n) {
     case HLE_INT25: case HLE_INT26: {
         // 絶対ディスク読み書き。フロッピーのドライブだけイメージへ（AL=ドライブ 0=A:）
         char d = (char)('A' + AL(m));
-        FloppyImage* im = floppy::image();
-        if (!im || d != floppy::drive_letter()) { SETAX(m, 0x8002); set_cf(m, true); break; }
+        int fu = floppy::unit_of_letter(d);
+        FloppyImage* im = fu >= 0 ? floppy::image_unit(fu) : nullptr;
+        if (!im) { SETAX(m, 0x8002); set_cf(m, true); break; }
         uint32_t start = DX(m), count = CX(m), buf = lin(DS(m), BX(m));
         if (count == 0xFFFF) {   // 32bit 版: DS:BX にパケット
             uint32_t pk = buf;
@@ -2234,6 +2297,15 @@ void dos_hle(Machine* m, uint8_t n) {
         }
         if (n == HLE_INT26) { fatfs::reset(); dir_invalidate(); }
         if (ok) { SETAX(m, 0); set_cf(m, false); } else { SETAX(m, im->wprot ? 0x0300 : 0x0408); set_cf(m, true); }
+        if (m->cfg.trace) {
+            plog("[fd] INT %02Xh 論理セクタ %u から %u 個 → %s\n", n == HLE_INT25 ? 0x25 : 0x26, start, count, ok ? "成功" : "失敗");
+            if (n == HLE_INT25) {   // 読んだ内容を何と比べるかを記録する（cpu.cpp）
+                cpu_dw_begin(buf, count * (uint32_t)im->lsec_size, "");
+                cpu_dw_taint8(4, (uint8_t)(AX(m) >> 8), "INT25 の結果(AH)");
+                cpu_dw_taint8(0, (uint8_t)AX(m), "INT25 の結果(AL)");
+                plog("[fdchk] ↓ここから、読んだ %u バイト（[%05X]〜）と結果 AX を比べる命令を記録\n", count * (uint32_t)im->lsec_size, buf & 0xFFFFF);
+            }
+        }
         break; }
     case HLE_INT2F: {
         uint16_t ax = AX(m);
@@ -2255,6 +2327,7 @@ void dos_hle(Machine* m, uint8_t n) {
 // ---- 初期化 ------------------------------------------------------------------
 void dos_init(Machine* m) {
     uint8_t* r = m->ram;
+    for (auto& f : s_sft) if (f.kind == 1 && f.h) hostfs::close(f.h);   // 再起動のとき: 開いたままのファイルを閉じる
     s_sft.clear(); s_sft.resize(5);
     s_sft[0].kind = 2; s_sft[0].refs = 1; s_sft[0].name = "CON";
     s_sft[1].kind = 4; s_sft[1].refs = 1; s_sft[1].name = "AUX";
@@ -2262,7 +2335,7 @@ void dos_init(Machine* m) {
     s_sft[3].kind = 3; s_sft[3].refs = 1; s_sft[3].name = "NUL";
     s_sft[4].kind = 2; s_sft[4].refs = 1;
     s_frames.clear(); s_search.clear(); s_batch.clear(); s_env.clear();
-    s_cwd.clear(); s_dircache.clear(); s_fdcwd.clear(); s_curdrv = 0; s_sg_drive = 0;
+    s_cwd.clear(); s_dircache.clear(); s_fdcwd.clear(); s_fdcwd2.clear(); s_curdrv = 0; s_sg_drive = 0;
     keytab_default(); s_pending_input.clear();
     s_retcode = 0; s_retcode_last = 0; s_shell_wait = 0; s_shell_running = false;
     s_alloc_strategy = 0;
@@ -2322,6 +2395,10 @@ void dos_init(Machine* m) {
     for (int i = 0; i < 16; i++) r[0x66C + i] = 0;
     if (m->cfg.drive >= 'A' && m->cfg.drive <= 'P') r[0x66C + (m->cfg.drive - 'A')] = 0x80;
     if (floppy::drive_letter() >= 'A' && floppy::drive_letter() <= 'P') r[0x66C + (floppy::drive_letter() - 'A')] = 0x90;
+    {   // 2 台目のフロッピー（FloppyDrive2=）はユニット 1（91h）
+        char l2 = floppy::drive_letter_unit(1);
+        if (l2 >= 'A' && l2 <= 'P') r[0x66C + (l2 - 'A')] = 0x91;
+    }
 
     // 割込みベクタ
     uint8_t code21[3] = {0xF1, HLE_INT21, 0xCF};
@@ -2402,7 +2479,10 @@ void dos_state_save(Machine* m, StateW& w) {
     w.tag("DRV1");
     w.pod(s_curdrv); w.str(s_fdcwd);
     { char fl = floppy::drive_letter(); w.pod(fl); }
-    w.str(floppy::image() ? floppy::image()->path : std::string());
+    w.str(floppy::current_path());
+    w.tag("DRV2");   // 2 台目のフロッピー（開いているファイルを開き直す前に入れ直す）
+    { char l2 = floppy::drive_letter_unit(1); w.pod(l2); }
+    w.str(floppy::current_path_unit(1)); w.str(s_fdcwd2);
     if (!s_keytab_init) keytab_default();
     w.tag("KEY1");
     for (int i = 0; i < 20; i++) for (int k = 0; k < 16; k++) w.pod(s_fkey[i][k]);
@@ -2439,13 +2519,26 @@ void dos_state_load(Machine* m, StateR& r) {
         char fl = 0; r.pod(fl);
         std::string fp = r.str();
         floppy::set_drive_letter(fl);
-        FloppyImage* cur = floppy::image();
-        if (fp.empty()) { if (cur) floppy::eject(); }
-        else if (!cur || cur->path != fp) {
+        std::string cur = floppy::current_path();
+        if (fp.empty()) { if (!cur.empty()) floppy::eject(); }
+        else if (cur != fp) {
             std::string e;
             if (!floppy::insert(fp, &e)) plog("[state] フロッピーを入れ直せません: %s (%s)\n", fp.c_str(), e.c_str());
         }
     } else { s_curdrv = 0; s_fdcwd.clear(); }
+    s_fdcwd2.clear();
+    if (r.peek_tag("DRV2")) {
+        r.tag("DRV2");
+        char l2 = 0; r.pod(l2);
+        std::string fp = r.str(); s_fdcwd2 = r.str();
+        floppy::set_drive_letter_unit(1, l2);
+        std::string cur = floppy::current_path_unit(1);
+        if (fp.empty()) { if (!cur.empty()) floppy::eject_unit(1); }
+        else if (cur != fp) {
+            std::string e;
+            if (!floppy::insert_unit(1, fp, &e)) plog("[state] 2 台目のフロッピーを入れ直せません: %s (%s)\n", fp.c_str(), e.c_str());
+        }
+    }
     keytab_default();
     if (r.peek_tag("KEY1")) {
         r.tag("KEY1");

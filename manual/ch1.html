@@ -14,6 +14,7 @@
   <a class="ch" href="ch2.html">第二章 HDI イメージ</a>
   <a class="ch" href="ch3.html">第三章 FDI イメージ</a>
   <a class="ch" href="ch4.html">第四章 トラブルシューティング</a>
+  <a class="ch" href="ch5.html">第五章 メモリエディタ</a>
 </div></div>
 
 <div class="wrap">
@@ -36,6 +37,7 @@
     <li><a href="#ini">設定（PC98PLAYER.INI）</a></li>
     <li><a href="#sound">音源の設定</a></li>
     <li><a href="#memory">メモリ（EMS／XMS）の設定</a></li>
+    <li><a href="#gamepad">ゲームパッド</a></li>
   </ol>
 </nav>
 
@@ -72,6 +74,8 @@
 <pre>[PC98PLAYER]
 Start=NANPA2.BAT</pre>
 <ul>
+  <li>選択の画面は、前回ほかのゲームで開いたフォルダではなく、必ずこれから遊ぶゲームのフォルダ（作業フォルダー。そこに実行ファイルが無いときは <code>PC98PLAYER.EXE</code> のあるフォルダ）を開きます。<a href="#shared">1-5</a> の順番で決まったフォルダです。</li>
+  <li>最初に選ばれているファイルは、CONFIG.SYS の <code>SHELL=</code> に書かれた起動用のプログラム（例: <code>SHELL=MPSTART.COM</code>）、次に <code>AUTOEXEC.BAT</code> です。サウンドドライバなどを組み込んでからゲームを起動するものが多いので、ゲーム本体（MP.COM など）を直接選ぶと音楽が鳴らないことがあります。</li>
   <li>選択の画面を「キャンセル」で閉じたときは、起動しそうなファイルを推測して INI を作ります。</li>
   <li>違うファイルが選ばれた・見つからないときは、INI の <code>Start=</code> をメモ帳で書き直して、もう一度起動してください。</li>
   <li>サブフォルダの中のファイル（例: <code>GAME\GAME.EXE</code>）を選ぶと、そのフォルダをカレントにして起動します。</li>
@@ -98,6 +102,7 @@ Start=NANPA2.BAT</pre>
   <tr><td><kbd>Shift</kbd>+<kbd>F12</kbd>（押している間）</td><td>早送り</td></tr>
   <tr><td><kbd>Alt</kbd>+<kbd>Enter</kbd></td><td>全画面表示の切り替え</td></tr>
   <tr><td><kbd>Alt</kbd>+<kbd>F4</kbd></td><td>終了</td></tr>
+  <tr><td>ゲームパッド</td><td>音源ボードのジョイスティック端子につないだ ATARI 仕様のジョイスティック（ボタンにキーも割り当て可。<a href="#gamepad">1-11</a>）</td></tr>
 </table>
 </div>
 
@@ -105,14 +110,17 @@ Start=NANPA2.BAT</pre>
 <p>ゲームの途中でセーブできない PC-98 のゲームでも、その瞬間の状態をまるごと保存・再開できます。</p>
 <figure>
   <img src="images/ch1_state_menu.png" alt="ステートセーブ・ロードの画面" width="800" height="500">
-  <figcaption>図 1-3　F11 の画面。上の 2/3 に 8 個のスロット（縮小画像つき）、下の 1/3 にフロッピーの欄があります。</figcaption>
+  <figcaption>図 1-3　F11 の画面。上の 2/3 に 8 個のスロット（縮小画像つき）、下の 1/3 の左にフロッピーの欄、右に「その他」の欄があります。</figcaption>
 </figure>
 <ul>
   <li><kbd>Shift</kbd>+<kbd>F11</kbd> で保存用、<kbd>F11</kbd> で読み込み用の画面が開きます。</li>
   <li>カーソルキーまたはマウスで選び、<kbd>Enter</kbd> か左クリックで決定、<kbd>Esc</kbd>・右クリック・<kbd>F11</kbd> で取り消します。</li>
   <li>画面を開いている間、ゲームは止まっています。保存済みのスロットは上書きされます。</li>
   <li>保存先はゲームのフォルダの <code>PC98PLAYER.SAV\SLOT1.P98S</code>〜<code>SLOT8.P98S</code> です（1 個 約 1.4MB）。窓を閉じても残ります。</li>
-  <li>下の「フロッピー」の欄では、フロッピーの出し入れができます（<a href="#floppy">1-7</a>・<a href="ch3.html#swap">第三章</a>）。</li>
+  <li>左下の「フロッピー」の欄では、フロッピーの出し入れができます（<a href="#floppy">1-7</a>・<a href="ch3.html#swap">第三章</a>）。</li>
+  <li>右下の「その他」の欄の「M: メモリエディタ」（<kbd>M</kbd> キー）で<a href="ch5.html">メモリエディタ</a>を開けます。</li>
+  <li>右下の「その他」の欄の「R: プログラム再起動」（<kbd>R</kbd> キー）で、PC-98 の電源を入れ直したのと同じように、ゲームを最初から起動し直せます。確認に「はい」と答えると、窓はそのままで起動し直します。入っているフロッピーはそのままです。ゲームでセーブしていない進行は失われますが、ステートセーブは残ります。<br>
+    このとき <strong><code>PC98PLAYER.INI</code> も読み直します</strong>。INI をメモ帳で書き換えて保存 → <kbd>F11</kbd> → <kbd>R</kbd> →「はい」で、PC98PLAYER を閉じずに新しい設定で試せます（<a href="#reload">1-8 の「INI の読み直し」</a>）。</li>
 </ul>
 <div class="warn"><strong>注意:</strong> PC98PLAYER の版が大きく変わると、古いステートを読めなくなる場合があります。大事な進行は、できるだけゲーム本来のセーブ機能でも保存してください。</div>
 
@@ -159,20 +167,49 @@ Start=NANPA2.BAT</pre>
 <p>ゲームのフォルダはハードディスク（既定は A:）として見せたまま、フロッピーのイメージや本物のフロッピードライブを別のドライブ（既定は B:）に入れられます。
 「マスターディスク（キーディスク）を入れてください」と求めるゲームなどで使います。</p>
 <ul>
-  <li><strong>起動時に入れる:</strong> INI に <code>FloppyImage=</code>（イメージのファイル名。ゲームのフォルダからの相対パスかフルパス）と <code>FloppyDrive=</code> を書きます。</li>
+  <li><strong>起動時に入れる:</strong> INI に <code>FloppyImage=</code>（イメージのファイル名。ゲームのフォルダからの相対パスかフルパス）と <code>FloppyDrive=</code> を書きます。<code>FloppyImage=</code> は <code>FloppyDisk=</code> と書いても同じです（本物のドライブやフォルダを指すときは、こちらのほうが読みやすいかもしれません）。</li>
   <li><strong>途中で入れる・入れ替える・取り出す:</strong> <kbd>F11</kbd> の画面の下の「フロッピー」の欄から。<kbd>F</kbd>（入れる／実機…）でイメージや本物のドライブを選び、<kbd>E</kbd> で取り出します。</li>
   <li><strong>使える形式:</strong> D88（.D88 .D68 .88D .D98）、FDI（Anex86）、NFD（T98-Next の r0・r1）、ヘッダ無しのベタ（.HDM .XDF .DUP .TFD .2HD .IMG など）、フラックスイメージ（.SCP・.HFE。読み込みのみ）。</li>
-  <li><strong>本物のドライブ:</strong> <code>FloppyImage=FDD:A</code>（USB フロッピー）や <code>FloppyImage=GW</code>（Greaseweazle）。詳しくは<a href="ch3.html#drives">第三章 3-7</a>。</li>
+  <li><strong>フォルダをフロッピーにする:</strong> <code>FloppyImage=</code> にフォルダ名を書くと（例: <code>FloppyImage=DISK_A\</code> や <code>FloppyImage=E:\GAME\PC98\メルクリウスプリティ\DISK_A\</code>）、そのフォルダの中身をそのままフロッピーのドライブとして見せます。
+    キーディスクの中のファイルがあるかどうか・中身が正しいかを確かめるだけのゲームなら、ディスクの中身をフォルダにコピーしておけばイメージは要りません。
+    ファイルの読み書きはそのフォルダに対して行います。セクタ単位の読み書き（INT 1Bh・INT 25h）はできないので、特殊なセクタを確かめるプロテクトには使えません。
+    F11 の画面の「F: 入れる／実機…」のメニューの「フォルダを入れる…」からも入れられます。</li>
+  <li><strong>本物のドライブ:</strong> <code>FloppyDisk=FDD:A</code>（USB フロッピー）や <code>FloppyDisk=GW</code>（Greaseweazle）。詳しくは<a href="ch3.html#drives">第三章 3-7</a>。</li>
 </ul>
 <pre>[PC98PLAYER]
 Start=GAME.BAT
 FloppyImage=MASTER.D88
 FloppyDrive=B</pre>
+<h3 id="floppy2">ドライブ 2 台（A: と B: にフロッピー、C: にハードディスク など）</h3>
+<p>実機のフロッピードライブ 2 台を前提にしたゲーム（「A ディスクをドライブ 1 に、B ディスクをドライブ 2 に入れて起動」など）は、
+<code>FloppyDisk2=</code> で 2 台目のドライブにもディスクを入れます。ドライブ名は <code>FloppyDrive=</code>・<code>FloppyDrive2=</code>・<code>Drive=</code>（ゲームのフォルダ＝ハードディスク）で自由に並べられます。</p>
+<pre>; 例: ランス３（アリスソフト。配布フリー版）。A ディスクの AUTOEXEC.BAT から、実機と同じ形で動かす
+[PC98PLAYER]
+Drive=C
+FloppyDrive=A
+FloppyDisk=ADISK_GR.D88
+FloppyDrive2=B
+FloppyDisk2=BDISK.D88
+Start=A:\AUTOEXEC.BAT</pre>
+<ul>
+  <li>イメージはゲームのフォルダ（ここでは C:）に置きます。C: は空のフォルダでも構いません。</li>
+  <li><kbd>F11</kbd> の画面のフロッピーの欄で、<kbd>D</kbd>（または見出しのボタン）で操作するドライブを切り替え、<kbd>N</kbd>／<kbd>P</kbd> でフォルダにあるイメージを順に入れ替えます（ランス３なら、ゲームの指示に合わせて B: を C〜F ディスクへ）。下の行に、もう一方のドライブに入っているディスクが出ます。</li>
+  <li>2 台目のドライブもディスク BIOS（ユニット 1）から読めます（DA/UA の表では 91h）。</li>
+  <li>ステートセーブは、2 台のドライブに入っていたディスクも覚えています。</li>
+</ul>
 <div class="warn"><strong>注意:</strong> フロッピーへの書き込みは、その場でイメージファイルへ書き戻されます（元に戻せません）。大事なイメージは先にコピーを取ってから使ってください。キーディスクの確認で先へ進まないときは<a href="ch4.html#floppy">第四章 4-7</a>を見てください。</div>
 
 <h2 id="ini">1-8. 設定（PC98PLAYER.INI）</h2>
 <p>ゲームのフォルダの <code>PC98PLAYER.INI</code> をメモ帳などで編集します。文字コードは Shift_JIS・UTF-8 のどちらでも構いません。
 <code>;</code> から行末まではコメントです。書かなかった項目は既定値になります。</p>
+<p id="reload"><strong>INI の読み直し:</strong> 動かしたまま INI を書き換えて保存し、<kbd>F11</kbd> の画面の「R: プログラム再起動」を実行すると、INI を読み直してから PC-98 を起動し直します。
+設定を変えては試す、を EXE を立ち上げ直さずに繰り返せます。</p>
+<ul>
+  <li>ほとんどの項目（<code>Start=</code>・<code>CpuMHz=</code>・音・メモリ・<code>Drive=</code>・ゲームパッド・<code>Title=</code>・<code>Scale=</code>・<code>FullScreen=</code>・<code>SampleRate=</code>・<code>MIDI=</code> など）がそのまま反映されます。</li>
+  <li><code>FloppyDisk=</code>／<code>FloppyImage=</code> は、書き換えたときだけ入れ替えます。変えていなければ、F11 の画面で入れ替えたフロッピーがそのまま入っています。</li>
+  <li><code>Trace=</code> は、一度記録を始めると、終了するまで記録したままです。</li>
+  <li>INI が読めない・<code>Start=</code> が空、などのときは、今の設定のまま起動し直します（そのことを画面に知らせます）。</li>
+</ul>
 
 <h3>基本</h3>
 <div class="tablewrap">
@@ -196,7 +233,10 @@ FloppyDrive=B</pre>
 <div class="tablewrap">
 <table>
   <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
-  <tr><td><code>FloppyImage=</code></td><td>なし</td><td>起動と同時に入れるフロッピーイメージ。<code>FDD:A</code>（USB フロッピー）、<code>GW</code>・<code>GW:COM5</code>（Greaseweazle）で本物のドライブも使えます。</td></tr>
+  <tr><td><code>FloppyDisk=</code><br><code>FloppyImage=</code></td><td>なし</td><td>起動と同時に入れるフロッピー（どちらの名前で書いても同じ働きです。両方あれば <code>FloppyDisk=</code> を使います）。イメージのファイル名のほか、<code>FDD:A</code>（USB フロッピー）、<code>GW</code>・<code>GW:COM5</code>（Greaseweazle）で本物のドライブも使えます。フォルダ名を書くと、そのフォルダをフロッピーとして見せます（下の 1-7）。</td></tr>
+  <tr><td><code>Boot=</code></td><td>なし</td><td><code>FD</code> にすると、MS-DOS を使わずに <code>FloppyDisk=</code> のフロッピーから直接起動します（PC-98 初期の独自形式のディスク。<a href="ch3.html#boot">第三章 3-11</a>）。</td></tr>
+  <tr><td><code>FloppyDisk2=</code></td><td>なし</td><td>2 台目のフロッピードライブに入れるディスク（<a href="#floppy2">1-7 の「ドライブ 2 台」</a>）。</td></tr>
+  <tr><td><code>FloppyDrive2=</code></td><td>1 台目の次</td><td>2 台目のフロッピーのドライブ名（<code>FloppyDisk2=</code> を書いたとき）。</td></tr>
   <tr><td><code>FloppyDrive=</code></td><td>B</td><td>フロッピーを何ドライブとして見せるか（A〜Z。<code>Drive=</code> と同じ文字なら次の文字にずらします）。</td></tr>
   <tr><td><code>FloppyWriteProtect=</code></td><td>0</td><td>1: 入れるフロッピーを必ず書き込み禁止にして見せる。</td></tr>
   <tr><td><code>GWDrive=</code></td><td>A</td><td>Greaseweazle につないだドライブ（A / B。Shugart 接続なら 0 / 1 / 2）。</td></tr>
@@ -221,12 +261,26 @@ FloppyDrive=B</pre>
 <table>
   <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
   <tr><td><code>CpuMHz=</code></td><td>16</td><td>仮想 CPU の速さ（MHz 相当）。命令の重さは 386 程度で数えているため、i486DX2（66MHz）推奨のソフトは 100〜133 くらいが目安です。上げるほどパソコン側の負荷が増えます。</td></tr>
+  <tr><td><code>IdleSkip=</code></td><td>1</td><td>1: ゲームが割込みを待って同じところを回っているだけのとき、その間の命令を実行せずに待つ（結果は変わらず、早送りが速くなり、パソコンの負荷も下がります）。0: しない（おかしな動きをするときの確認用）。</td></tr>
   <tr><td><code>MouseSpeed=</code></td><td>100</td><td>マウスの速さ（%）。</td></tr>
   <tr><td><code>MouseDriver=</code></td><td>1</td><td>1: マウスドライバ（MOUSE.COM 相当）を用意する。0: 用意しない。</td></tr>
   <tr><td><code>KeyRepeat=</code></td><td>1</td><td>0 にするとキーの押しっぱなしで連打を送らない。</td></tr>
   <tr><td><code>PauseInactive=</code></td><td>0</td><td>1 で、ほかのウインドウを操作している間ゲームを止める。</td></tr>
   <tr><td><code>MouseLockDisable=</code></td><td>0</td><td>1 にすると、マウスを一切捕まえません（マウスを使わないソフト向け）。</td></tr>
   <tr><td><code>MiddleRelease=</code></td><td>1</td><td>中ボタン（ホイール）クリックでマウスを放す。0 で無効。</td></tr>
+</table>
+</div>
+
+<h3>ゲームパッド</h3>
+<div class="tablewrap">
+<table>
+  <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
+  <tr><td><code>Joystick=</code></td><td>1</td><td>0 にすると、ゲームパッドを使いません。</td></tr>
+  <tr><td><code>JoyDevice=</code></td><td>0</td><td>0: 最初に見つかったゲームパッド。1〜16: その番号のゲームコントローラ（2 台以上つないでいるとき）。</td></tr>
+  <tr><td><code>JoyDirection=</code></td><td>JOY</td><td>スティック・十字キーの行き先。<code>JOY</code>（ジョイスティック）／<code>CURSOR</code>（カーソルキー）／<code>TENKEY</code>（テンキーの 8・4・6・2）／<code>NONE</code>。<code>JOY+CURSOR</code> のように重ねられます。</td></tr>
+  <tr><td><code>JoyButton1=</code>〜<code>JoyButton32=</code></td><td>1=A 2=B<br>3=SPACE 4=RETURN</td><td>ボタンの割り当て（番号は Windows の「ゲーム コントローラーの設定」のボタン番号）。<code>A</code>／<code>B</code> = トリガ、<code>RAPIDA</code>／<code>RAPIDB</code> = 連射、キー名、<code>NONE</code>。<code>A+RETURN</code> のように重ねられます（<a href="#gamepad">1-11</a>）。</td></tr>
+  <tr><td><code>JoyDeadZone=</code></td><td>50</td><td>アナログスティックの遊び（%）。これより大きく倒すと入ります。</td></tr>
+  <tr><td><code>JoyRapid=</code></td><td>4</td><td>連射の速さ。何フレーム（1/60 秒）ごとに押す／放すを切り替えるか（1〜30。小さいほど速い）。</td></tr>
 </table>
 </div>
 
@@ -237,7 +291,7 @@ FloppyDrive=B</pre>
   <tr><td><code>SoundBoard=</code></td><td>86</td><td>86: PC-9801-86 相当（FM 6 音＋SSG＋リズム＋PCM）。26: PC-9801-26K 相当（FM 3 音＋SSG）。0: 音源なし。</td></tr>
   <tr><td><code>SoundIRQ=</code></td><td>12</td><td>音源ボードの割込み（3 / 10 / 12 / 13）。</td></tr>
   <tr><td><code>Sound=</code></td><td>1</td><td>0 で FM 音源の音を出さない（ボード自体はある扱い）。</td></tr>
-  <tr><td><code>Volume=</code></td><td>100</td><td>全体の音量（%、0〜1000）。音量の小さいソフト（Ray など）は 300 前後がおすすめ。</td></tr>
+  <tr><td><code>Volume=</code></td><td>100</td><td>全体の音量（%、0〜1000）。100 を超えて上げると、大きな山は自動で丸めて音割れを抑えます。</td></tr>
   <tr><td><code>FMVolume=</code> / <code>SSGVolume=</code></td><td>100</td><td>FM 音源・SSG の音量（%）。</td></tr>
   <tr><td><code>PCMVolume=</code></td><td>100</td><td>86 ボードの PCM の音量（%）。</td></tr>
   <tr><td><code>BeepVolume=</code></td><td>50</td><td>ビープ音の音量（%）。</td></tr>
@@ -263,11 +317,12 @@ FloppyDrive=B</pre>
 </table>
 </div>
 
-<h3>記録（トラブル調査用）</h3>
+<h3>記録・調べもの</h3>
 <div class="tablewrap">
 <table>
   <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
   <tr><td><code>Trace=</code></td><td>0</td><td>1 にすると、ゲームのフォルダに <code>PC98PLAYER.LOG</code> を書き出します（<a href="ch4.html#trace">第四章 4-10</a>）。</td></tr>
+  <tr><td><code>MemoryEditor=</code></td><td>0</td><td>1 にすると、起動と同時に<a href="ch5.html">メモリエディタ</a>を別の窓で開きます。</td></tr>
 </table>
 </div>
 
@@ -303,6 +358,46 @@ ExitOnEnd=0</pre>
   <li>EMS や XMS があると落ちるゲームがあれば、<code>EMS=0</code>、<code>XMS=0</code> を 1 つずつ試してください。</li>
   <li>DOS エクステンダ（プロテクトモード）や VCPI/DPMI を必要とするゲームには対応していません。</li>
 </ul>
+
+<h2 id="gamepad">1-11. ゲームパッド</h2>
+<p>PC-9801-26K・86 などの音源ボードには、ATARI 仕様のジョイスティック（上下左右とトリガ A・B の 2 ボタン）をつなぐ端子がありました。
+ジョイスティックに対応したゲームは、この端子を音源（YM2608）の I/O ポートから直接読みます。PC98PLAYER は、Windows につないだゲームパッドをこの端子に割り当てます。</p>
+<ul>
+  <li>ゲームパッドを USB につなぐだけで使えます（Xbox 用コントローラなど、Windows の「ゲーム コントローラーの設定」に出てくるもの）。抜き差しにも追いかけます。使い始めると画面にゲームパッドの名前を知らせます。</li>
+  <li>左スティックと十字キー（POV ハット）のどちらでも方向を入れられます。</li>
+  <li>窓が前に出ているときだけ効きます（キーボードと同じ）。</li>
+  <li>ゲームのほうでジョイスティックを使う設定（「JOY」「PAD」など）を選ぶ必要があるソフトもあります。</li>
+</ul>
+
+<h3>ボタンにキーを割り当てる</h3>
+<p>ジョイスティックに対応していないゲームでも、ボタンに PC-98 のキーを割り当てれば、ゲームパッドで遊べます。方向は <code>JoyDirection=CURSOR</code>（カーソルキー）か <code>TENKEY</code>（テンキー）にします。</p>
+<pre>; ジョイスティック対応のシューティング（ボタン 3 を A の連射に）
+JoyButton1=A
+JoyButton2=B
+JoyButton3=RAPIDA
+
+; キーボードだけのアドベンチャー（方向はカーソルキー、ボタンは決定・取り消し）
+JoyDirection=CURSOR
+JoyButton1=RETURN
+JoyButton2=ESC
+JoyButton3=SPACE
+JoyButton8=F1</pre>
+<p>使えるキー名（大文字・小文字は区別しません）:</p>
+<div class="tablewrap">
+<table>
+  <tr><th>種類</th><th>書き方</th></tr>
+  <tr><td>ジョイスティック</td><td><code>A</code> <code>B</code>（トリガ）、<code>RAPIDA</code> <code>RAPIDB</code>（連射）、<code>JOYUP</code> <code>JOYDOWN</code> <code>JOYLEFT</code> <code>JOYRIGHT</code></td></tr>
+  <tr><td>文字</td><td><code>KEYA</code> <code>KEYB</code>（文字の A・B キー。<code>A</code>・<code>B</code> だけだとトリガになります）、<code>C</code>〜<code>Z</code>、<code>0</code>〜<code>9</code></td></tr>
+  <tr><td>よく使うキー</td><td><code>RETURN</code>（<code>ENTER</code>）<code>SPACE</code> <code>ESC</code> <code>TAB</code> <code>BS</code> <code>UP</code> <code>DOWN</code> <code>LEFT</code> <code>RIGHT</code></td></tr>
+  <tr><td>ファンクション</td><td><code>F1</code>〜<code>F10</code>、<code>VF1</code>〜<code>VF5</code></td></tr>
+  <tr><td>特殊キー</td><td><code>SHIFT</code> <code>CTRL</code> <code>GRPH</code> <code>KANA</code> <code>CAPS</code> <code>XFER</code> <code>NFER</code> <code>ROLLUP</code> <code>ROLLDOWN</code> <code>INS</code> <code>DEL</code> <code>HOME</code> <code>HELP</code> <code>STOP</code> <code>COPY</code></td></tr>
+  <tr><td>テンキー</td><td><code>NUM0</code>〜<code>NUM9</code> <code>NUM+</code> <code>NUM-</code> <code>NUM*</code> <code>NUM/</code> <code>NUM=</code> <code>NUM,</code> <code>NUM.</code></td></tr>
+  <tr><td>記号</td><td><code>MINUS</code> <code>CARET</code> <code>YEN</code> <code>AT</code> <code>[</code> <code>]</code> <code>SEMICOLON</code> <code>COLON</code> <code>COMMA</code> <code>PERIOD</code> <code>SLASH</code> <code>UNDERSCORE</code></td></tr>
+  <tr><td>キーコード</td><td><code>0x1C</code> のように PC-98 のキーコードを 16 進で</td></tr>
+</table>
+</div>
+<p>読めない書き方があると、起動したとき（または再起動したとき）に画面の下に知らせます。割り当てを変えたら、<kbd>F11</kbd> → <kbd>R</kbd> で読み直して試せます。</p>
+<p>ボタンの番号が分からないときは、Windows の「USB ゲーム コントローラーのセットアップ」（<code>joy.cpl</code>）の「プロパティ」で、押したボタンの番号が光ります。</p>
 
 <div class="pager">
   <a class="prev" href="index.html"><small>← 前へ</small>目次</a>

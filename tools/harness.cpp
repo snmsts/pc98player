@@ -20,6 +20,7 @@ static void fa(void*, uint8_t c, uint8_t out[16]) { memcpy(out, &g_font[94 * 94 
 struct KeyEv { int frame; int sc; int down; };
 struct MouseEv { int frame, dx, dy, b; };
 static std::vector<MouseEv> mev;
+static std::vector<std::pair<int,int>> jev;   // --joy f:bits（16 進）
 static int save_f = -1, save_slot = 0, load_f = -1, load_slot = 0;
 
 #include "../core/floppy.h"
@@ -52,6 +53,7 @@ int main(int argc, char** argv) {
         else if (a == "--shot") { std::string s = next(); char* p = &s[0]; while (*p) { shots.insert((int)strtol(p, &p, 10)); if (*p == ',') p++; } }
         else if (a == "--key") { std::string s = next(); KeyEv k; k.down = 2; sscanf(s.c_str(), "%d:%x", &k.frame, &k.sc); if (s.find(":u") != std::string::npos) k.down = 0; else if (s.find(":d") != std::string::npos) k.down = 1; keys.push_back(k); }
         else if (a == "--mouse") { std::string s2 = next(); MouseEv e; sscanf(s2.c_str(), "%d:%d:%d:%d", &e.frame, &e.dx, &e.dy, &e.b); mev.push_back(e); }
+        else if (a == "--joy") { std::string s2 = next(); int f = 0; unsigned b = 0; sscanf(s2.c_str(), "%d:%x", &f, &b); jev.push_back({f, (int)b}); }
         else if (a == "--save") { std::string s2 = next(); sscanf(s2.c_str(), "%d:%d", &save_f, &save_slot); }
         else if (a == "--load") { std::string s2 = next(); sscanf(s2.c_str(), "%d:%d", &load_f, &load_slot); }
         else if (a == "--wav") wav = next();
@@ -118,25 +120,32 @@ int main(int argc, char** argv) {
         if (f == (getenv("HISTF") ? atoi(getenv("HISTF")) : 2100)) memset(g_opna_hist, 0, sizeof(g_opna_hist));
         { extern int g_prof_cs; extern unsigned* g_prof; if (f == (getenv("PROFF") ? atoi(getenv("PROFF")) : 2100) && getenv("PROFCS")) { g_prof = (unsigned*)calloc(65536, 4); g_prof_cs = (int)strtol(getenv("PROFCS"), 0, 16); } }
         if (f == save_f) { std::string e2; fprintf(stderr, "save slot%d: %s %s\n", save_slot, p->save_state(save_slot, &e2) ? "ok" : "NG", e2.c_str()); }
-        if (f == load_f) { std::string e2; fprintf(stderr, "load slot%d: %s %s\n", load_slot, p->load_state(load_slot, &e2) ? "ok" : "NG", e2.c_str());
+        if (f == load_f) { std::string e2; bool lok = p->load_state(load_slot, &e2); fprintf(stderr, "load slot%d: %s %s\n", load_slot, lok ? "ok" : "NG", e2.c_str());
             fprintf(stderr, "keyon:"); for (int i = 0; i < 8; i++) fprintf(stderr, " %02X", p->m->opna.keyon[i]);
             fprintf(stderr, " A0-A6:"); for (int i = 0xA0; i < 0xA7; i++) fprintf(stderr, " %02X", p->m->opna.reg[0][i]);
             fprintf(stderr, " 40-4E:"); for (int i = 0x40; i < 0x4F; i++) fprintf(stderr, " %02X", p->m->opna.reg[0][i]);
             fprintf(stderr, " B0-B6:"); for (int i = 0xB0; i < 0xB7; i++) fprintf(stderr, " %02X", p->m->opna.reg[0][i]); fprintf(stderr, "\n"); }
+        if (getenv("REBOOTF") && f == atoi(getenv("REBOOTF"))) { std::string er; fprintf(stderr, "reboot: %s %s\n", p->reboot(&er) ? "ok" : "NG", er.c_str()); }
         for (auto& e : mev) if (e.frame == f) machine_mouse(p->m, e.dx, e.dy, e.b);
+        for (auto& e : jev) if (e.first == f) machine_joystick(p->m, (uint8_t)e.second);
         for (auto& e : cpev) if (e.first == f) {
             FILE* i = fopen(e.second.first.c_str(), "rb"); FILE* o = fopen(e.second.second.c_str(), "r+b");
             if (i && o) { std::vector<char> b(1 << 20); size_t n; while ((n = fread(b.data(), 1, b.size(), i)) > 0) fwrite(b.data(), 1, n, o); }
             if (i) fclose(i); if (o) fclose(o);
             fprintf(stderr, "cpfile %s -> %s\n", e.second.first.c_str(), e.second.second.c_str());
         }
-        for (auto& e : fdev) if (e.first == f) { std::string er; fprintf(stderr, "fd insert %s: %s\n", e.second.c_str(), floppy::insert(e.second, &er) ? "ok" : er.c_str()); }
+        for (auto& e : fdev) if (e.first == f) {
+            std::string er, path = e.second; int unit = 0;
+            if (path.size() > 2 && path[0] == '#' && path[2] == '#') { unit = path[1] - '0'; path = path.substr(3); }   // --fd f:#1#path = 2 台目
+            fprintf(stderr, "fd insert u%d %s: %s\n", unit, path.c_str(), floppy::insert_unit(unit, path, &er) ? "ok" : er.c_str());
+            fprintf(stderr, "  now u0=%s u1=%s\n", floppy::current_path_unit(0).c_str(), floppy::current_path_unit(1).c_str());
+        }
         { extern int g_trace_port_lo, g_trace_port_hi; static int saved_lo = -1, saved_hi = -1;
           if (getenv("TRACEPORT_FROM")) { int from = atoi(getenv("TRACEPORT_FROM"));
             if (f == 0) { saved_lo = g_trace_port_lo; saved_hi = g_trace_port_hi; g_trace_port_lo = 1; g_trace_port_hi = 0; }
             if (f == from) { g_trace_port_lo = saved_lo; g_trace_port_hi = saved_hi; } } }
         bool shot = shots.count(f) > 0 || f == frames - 1; bool rend = shot || getenv("RENDERALL");
-        p->run_frame(rend);
+        p->run_frame(rend, !getenv("NOAUDIO"));
         if (!wav.empty()) pcm.insert(pcm.end(), p->audio.begin(), p->audio.end());
         if (shot) {
             char fn[256]; snprintf(fn, sizeof(fn), "%s_%05d.ppm", out.c_str(), f);
@@ -153,6 +162,9 @@ int main(int argc, char** argv) {
     if (getenv("DUMPATTR")) {
         for (int r = 0; r < 25; r++) { fprintf(stderr, "attr %2d:", r); for (int c = 0; c < 80; c++) fprintf(stderr, "%02X", p->m->tvram[0x2000 + (r * 80 + c) * 2]); fprintf(stderr, "\n"); }
     }
+    if (getenv("GAMEBLOCKS")) { std::vector<DosMemBlock> b; dos_game_blocks(p->m, b); uint32_t t = 0;
+        for (auto& x : b) { fprintf(stderr, "block %05X-%05X %6u %s\n", x.start, x.start + x.len - 1, x.len, x.name.c_str()); t += x.len; }
+        fprintf(stderr, "game total %u bytes\n", t); }
     if (getenv("DUMPTEXT")) {
         for (int r = 0; r < 25; r++) {
             bool any = false;
@@ -179,6 +191,17 @@ int main(int argc, char** argv) {
     extern unsigned g_irq_count[16]; fprintf(stderr, "irq:"); for (int i = 0; i < 16; i++) fprintf(stderr, " %u", g_irq_count[i]); fprintf(stderr, "\n");
     { extern unsigned g_opna_hist[2][256]; fprintf(stderr, "hist:"); for (int pt = 0; pt < 2; pt++) for (int a = 0; a < 256; a++) if (g_opna_hist[pt][a]) fprintf(stderr, " %d:%02X=%u", pt, a, g_opna_hist[pt][a]); fprintf(stderr, "\n"); }
     if (getenv("DUMPMEM")) { unsigned sg, off, n; sscanf(getenv("DUMPMEM"), "%x:%x:%x", &sg, &off, &n); for (unsigned i = 0; i < n; i++) { if (i % 32 == 0) fprintf(stderr, "\n%04X:%04X ", sg, off + i); fprintf(stderr, "%02X ", p->m->ram[((sg << 4) + off + i) & 0xFFFFF]); } fprintf(stderr, "\n"); }
+    { extern unsigned g_spin_hits; fprintf(stderr, "spin hits=%u\n", g_spin_hits); }
+    if (getenv("DUMPTEXT")) {
+        int r0 = atoi(getenv("DUMPTEXT"));
+        uint32_t tsad = (uint32_t)(p->m->gdcm.pram[0] | (p->m->gdcm.pram[1] << 8));
+        for (int r = r0; r < r0 + 3 && r < 25; r++) {
+            fprintf(stderr, "row %d:", r);
+            for (int c = 0; c < 80; c++) { uint32_t cell = (tsad + r * 80 + c) & 0xFFF; fprintf(stderr, " %02X%02X/%02X", p->m->tvram[cell * 2], p->m->tvram[cell * 2 + 1], p->m->tvram[0x2000 + cell * 2]); }
+            fprintf(stderr, "\n");
+        }
+    }
+    if (getenv("DUMPRAM")) { FILE* df = fopen(getenv("DUMPRAM"), "wb"); if (df) { fwrite(p->m->ram, 1, 0x100000, df); fclose(df); } }
     { extern unsigned* g_prof; if (g_prof) { for (int i = 0; i < 65536; i++) if (g_prof[i]) fprintf(stderr, "%04X:%u ", i, g_prof[i]); fprintf(stderr, "\n"); } }
     if (getenv("FDLIST") && floppy::image()) {   // フロッピーの各トラックの ID と状態
         FloppyImage* im = floppy::image();

@@ -53,7 +53,10 @@ struct Vol {
     std::vector<uint8_t> fat;         // 1 つ目の FAT の中身
     std::set<uint32_t> dirty;         // 書き戻す FAT のセクタ番号（FAT 内の番号）
 };
-static Vol V;
+// ドライブ（ユニット）ごとの状態。各入口でパスのドライブ名かハンドルから s_u を選ぶ
+static Vol Vs[2];
+static int s_u = 0;
+#define V (Vs[s_u])
 
 struct Fh {                          // 開いているファイル
     uint32_t magic = 0x46415446;
@@ -61,20 +64,22 @@ struct Fh {                          // 開いているファイル
     uint32_t first = 0, size = 0, pos = 0;
     int mode = 0;
     uint32_t change = 0;
+    int unit = 0;
 };
 static std::set<void*> s_handles;
 
-void reset() { V = Vol(); }
+void reset() { Vs[0] = Vol(); Vs[1] = Vol(); }
 
-static FloppyImage* img() { return floppy::image(); }
+static FloppyImage* img() { return floppy::image_unit(s_u); }
+static int unit_of_vpath(const std::string& p) { return p.size() >= 2 && p[0] == '\x01' ? floppy::unit_of_letter(p[1]) : -1; }
 
 static bool mount() {
     floppy::poll_change();   // 実機のディスクが入れ替わっていれば、ここで変更回数が増えて読み直す
     FloppyImage* im = img();
     if (!im) { V.ok = false; return false; }
-    if (V.ok && V.change == floppy::change_count()) return true;
+    if (V.ok && V.change == floppy::change_count_unit(s_u)) return true;
     V = Vol();
-    V.change = floppy::change_count();
+    V.change = floppy::change_count_unit(s_u);
     std::vector<uint8_t> b((size_t)im->lsec_size);
     if (!im->read_lba(0, b.data())) return false;
     uint32_t bps = rd16(&b[11]), spc = b[13], res = rd16(&b[14]), nfat = b[16], rootent = rd16(&b[17]);
@@ -273,8 +278,9 @@ std::string root_path(char drive) { return std::string("\x01") + drive; }
 static bool split(const std::string& p, std::vector<std::string>& comps) {
     if (!is_vpath(p)) return false;
     char d = p[1];
-    if (d >= 'a' && d <= 'z') d = (char)(d - 32);
-    if (d != floppy::drive_letter()) return false;
+    int u = floppy::unit_of_letter(d);
+    if (u < 0) return false;
+    s_u = u;
     if (!mount()) return false;
     comps.clear();
     std::string cur;
@@ -379,13 +385,14 @@ void* open(const std::string& path, int mode, bool create, bool trunc) {
     Fh* f = new Fh();
     f->ent_lba = e.lba; f->ent_off = e.off;
     f->first = ent_cluster(e.raw); f->size = rd32(e.raw + 28); f->pos = 0; f->mode = mode;
-    f->change = floppy::change_count();
+    f->change = floppy::change_count_unit(s_u);
+    f->unit = s_u;
     s_handles.insert(f);
     return f;
 }
 void close(void* h) { s_handles.erase(h); delete (Fh*)h; }
 
-static bool fh_ok(Fh* f) { return mount() && f->change == floppy::change_count(); }
+static bool fh_ok(Fh* f) { s_u = f->unit; return mount() && f->change == floppy::change_count_unit(s_u); }
 // ファイルの k 番目のクラスタ（grow なら足りないぶんを確保）
 static uint32_t nth_cluster(Fh* f, uint32_t k, bool grow) {
     if (f->first < 2) {
@@ -527,6 +534,7 @@ bool rmdir(const std::string& path) {
     return true;
 }
 bool rename(const std::string& a, const std::string& b) {
+    if (unit_of_vpath(a) != unit_of_vpath(b)) return false;   // ドライブをまたぐ名前の変更はできない
     Ent ea, eb; bool ra = false, rb = false;
     if (!lookup(a, &ea, &ra) || ra || img()->wprot) return false;
     if (lookup(b, &eb, &rb)) return false;
@@ -567,7 +575,12 @@ bool get_time(void* h, uint16_t* d, uint16_t* t) {
     *t = rd16(&b[f->ent_off + 22]); *d = rd16(&b[f->ent_off + 24]);
     return true;
 }
-bool volume_label(std::string* name, uint16_t* date, uint16_t* time) {
+bool volume_label(std::string* name, uint16_t* date, uint16_t* time) { return volume_label_drive(floppy::drive_letter(), name, date, time); }
+bool free_space(uint32_t* spc, uint32_t* bps, uint32_t* fr, uint32_t* total) { return free_space_drive(floppy::drive_letter(), spc, bps, fr, total); }
+bool volume_label_drive(char drive, std::string* name, uint16_t* date, uint16_t* time) {
+    int u = floppy::unit_of_letter(drive);
+    if (u < 0) return false;
+    s_u = u;
     if (!mount()) return false;
     bool found = false;
     dir_walk(0, [&](const Ent& e, bool end) {
@@ -582,7 +595,10 @@ bool volume_label(std::string* name, uint16_t* date, uint16_t* time) {
     });
     return found;
 }
-bool free_space(uint32_t* spc, uint32_t* bps, uint32_t* fr, uint32_t* total) {
+bool free_space_drive(char drive, uint32_t* spc, uint32_t* bps, uint32_t* fr, uint32_t* total) {
+    int u = floppy::unit_of_letter(drive);
+    if (u < 0) return false;
+    s_u = u;
     if (!mount()) return false;
     uint32_t n = 0;
     for (uint32_t cl = 2; cl < V.nclus + 2; cl++) if (fat_get(cl) == 0) n++;

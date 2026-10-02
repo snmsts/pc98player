@@ -11,6 +11,7 @@
 Machine* g_m = nullptr;
 uint8_t* g_ram = nullptr;
 uint32_t g_addr_mask = 0xFFFFF;
+uint32_t g_side_fx = 0;
 extern int g_irq_hint;
 
 void egc_reset(Machine* m);
@@ -254,7 +255,9 @@ static uint8_t opna_read_data(Machine* m, int part) {
             int irqsel = 3;
             switch (m->cfg.sound_irq) { case 3: irqsel = 0; break; case 13: irqsel = 1; break;
                                          case 10: irqsel = 2; break; case 12: irqsel = 3; break; }
-            return (uint8_t)((irqsel << 6) | 0x3F);
+            // ポート B（reg 0Fh）の bit6 で 1P / 2P を選ぶ。2P は繋がっていないことにする
+            uint8_t j = (m->opna.reg[0][0x0F] & 0x40) ? 0 : m->joy;
+            return (uint8_t)((irqsel << 6) | (~j & 0x3F));
         }
         if (a == 0x0F) return 0xFF;
         if (a < 0x10) return m->opna.reg[0][a];
@@ -332,7 +335,12 @@ void machine_key(Machine* m, uint8_t sc, bool down) {
     m->kb_queue.push_back((uint8_t)(sc | (down ? 0 : 0x80)));
 }
 void machine_mouse(Machine* m, int dx, int dy, int buttons) {
-    m->mouse.acc_x += dx; m->mouse.acc_y += dy;
+    // バスマウスのカウンタへは 1 回に ±100 まで（8 ビットのカウンタが一度に一周して向きが逆に見えないように）
+    m->mouse.acc_x += dx > 100 ? 100 : dx < -100 ? -100 : dx;
+    m->mouse.acc_y += dy > 100 ? 100 : dy < -100 ? -100 : dy;
+    // HC を立てないゲームでは数え直されないので、下位 8 ビットを保ったまま大きくなりすぎないようにする
+    if (m->mouse.acc_x > 0x10000 || m->mouse.acc_x < -0x10000) m->mouse.acc_x %= 256;
+    if (m->mouse.acc_y > 0x10000 || m->mouse.acc_y < -0x10000) m->mouse.acc_y %= 256;
     m->mouse.hle_dx += dx; m->mouse.hle_dy += dy;
     Mouse* ms = &m->mouse;
     ms->x += dx; ms->y += dy;
@@ -347,6 +355,8 @@ void machine_mouse(Machine* m, int dx, int dy, int buttons) {
     }
     ms->buttons = (uint8_t)buttons;
 }
+void machine_joystick(Machine* m, uint8_t bits) { m->joy = (uint8_t)(bits & 0x3F); }
+
 static uint8_t mouse_porta(Machine* m) {
     Mouse* ms = &m->mouse;
     uint8_t v = 0x40;
@@ -358,9 +368,11 @@ static uint8_t mouse_porta(Machine* m) {
     int8_t lx, ly;
     if (ms->portc & 0x80) { lx = ms->lat_x; ly = ms->lat_y; }
     else {
-        int x = ms->acc_x, y = ms->acc_y;
-        lx = (int8_t)(x > 127 ? 127 : x < -128 ? -128 : x);
-        ly = (int8_t)(y > 127 ? 127 : y < -128 ? -128 : y);
+        // HC=0 の間は実機の 8 ビットのカウンタそのもの（あふれたら一周する）。
+        // HC を一度も立てず、前回読んだ値との差（256 で割った余り）で動きを求めるゲームがある（プリンセスメーカー2）。
+        // ここで ±127 に止めると、動ける範囲が画面の一部に限られてしまう
+        lx = (int8_t)(uint8_t)(ms->acc_x & 0xFF);
+        ly = (int8_t)(uint8_t)(ms->acc_y & 0xFF);
     }
     uint8_t nib;
     switch (sel) {
@@ -504,6 +516,7 @@ static uint8_t mpu_read_data(Machine* m) {
 }
 
 uint8_t mem_rb_slow(Machine* m, uint32_t a) {
+    g_side_fx++;
     if (a < 0xA4000) {
         if (a >= 0xA2000 && (a & 1)) return 0xFF;
         return m->tvram[a - 0xA0000];
@@ -547,6 +560,7 @@ void mem_wb_slow(Machine* m, uint32_t a, uint8_t v) {
     if (a < PC98_RAM_SIZE) m->ram[a] = v;
 }
 uint16_t mem_rw_slow(Machine* m, uint32_t a) {
+    g_side_fx++;
     uint32_t b = a & g_addr_mask;
     if (egc_on(m)) {
         uint32_t off, off2;
@@ -612,6 +626,7 @@ static unsigned s_port_log = 0;
 uint8_t io_in8_(Machine* m, uint16_t port);
 static bool unknown_io_log(Machine* m, uint16_t port);
 uint8_t io_in8(Machine* m, uint16_t port) {
+    g_side_fx++;
     uint8_t v = io_in8_(m, port);
     if (port >= g_trace_port_lo && port <= g_trace_port_hi && s_port_log++ < 3000) plog("[in ] %04X -> %02X @%04X:%04X\n", port, v, m->cpu.op_cs, m->cpu.op_ip);
     return v;
@@ -679,6 +694,7 @@ static bool unknown_io_log(Machine* m, uint16_t port) {
     return true;
 }
 void io_out8(Machine* m, uint16_t port, uint8_t v) {
+    g_side_fx++;
     if (port >= g_trace_port_lo && port <= g_trace_port_hi && s_port_log++ < 3000) plog("[out] %04X <- %02X @%04X:%04X\n", port, v, m->cpu.op_cs, m->cpu.op_ip);
     switch (port) {
     case 0x00: pic_write(m, 0, 0, v); return;
@@ -765,9 +781,11 @@ void io_out8(Machine* m, uint16_t port, uint8_t v) {
 }
 
 uint16_t io_in16(Machine* m, uint16_t port) {
+    g_side_fx++;
     return (uint16_t)(io_in8(m, port) | (io_in8(m, (uint16_t)(port + 1)) << 8));
 }
 void io_out16(Machine* m, uint16_t port, uint16_t v) {
+    g_side_fx++;
     if (port >= 0x4A0 && port <= 0x4AF) {
         if (port >= g_trace_port_lo && port <= g_trace_port_hi && s_port_log++ < 3000) plog("[out] %04X <- %04X (w) @%04X:%04X\n", port, v, m->cpu.op_cs, m->cpu.op_ip);
         egc_out16(m, port, v); return; }
@@ -777,6 +795,8 @@ void io_out16(Machine* m, uint16_t port, uint16_t v) {
 
 // ---- HLE 振り分け ------------------------------------------------------------
 void hle_trap(Machine* m, uint8_t n) {
+    g_side_fx++;
+    if (m->cfg.boot_fd && bios_rom_trap(m)) return;
     switch (n) {
     case HLE_INT20: case HLE_INT21: case HLE_INT25: case HLE_INT26: case HLE_INT27:
     case HLE_INT28: case HLE_INT29: case HLE_INT2F: case HLE_INT67: case HLE_XMS:
@@ -906,6 +926,7 @@ Machine* machine_create(const Config& cfg) {
     g_addr_mask = 0xFFFFF;
     memset(m->tvram, 0, sizeof(m->tvram));
     memset(m->gvram, 0, sizeof(m->gvram));
+    { extern int g_idle_skip; g_idle_skip = (cfg.idle_skip && !getenv("PC98PLAYER_NOIDLE")) ? 1 : 0; }
     m->cpu_hz = (uint32_t)cfg.cpu_mhz * 1000000u;
     if (m->cpu_hz < 1000000u) m->cpu_hz = 8000000u;
     cpu_reset(&m->cpu, m);
@@ -938,7 +959,7 @@ Machine* machine_create(const Config& cfg) {
     mpu_defaults(m->mpu);
     fontrom_reset_gaiji();
     bios_init(m);
-    dos_init(m);
+    if (!cfg.boot_fd) dos_init(m);   // ブートモードは MS-DOS を用意しない（IPL から起動する）
     return m;
 }
 void machine_destroy(Machine* m) {
