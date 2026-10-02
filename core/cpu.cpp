@@ -15,6 +15,9 @@
 #include "memio.h"
 #include <string.h>
 #include <stdio.h>
+#include <vector>
+#include <string>
+void plog(const char* fmt, ...);
 
 int g_irq_hint = 0;
 int g_trace_int = -1;
@@ -34,6 +37,9 @@ static bool     d_isreg;
 static uint32_t d_ea;         // 線形アドレス
 static uint32_t d_off;        // セグメント内オフセット（LEA 用）
 static int      d_cyc;
+static uint8_t  s_op, s_op0f;   // 実行した命令（比較の記録用）
+static int      s_vsz;
+static uint32_t s_moffs;        // MOV AL/AX,[moffs] の番地
 
 #define MASK(sz) ((sz) == 32 ? 0xFFFFFFFFu : ((1u << (sz)) - 1u))
 #define SIGN(sz) (1u << ((sz) - 1))
@@ -132,9 +138,11 @@ static inline uint32_t szp(uint32_t v, int sz) {
 }
 static inline void setfl(uint32_t f) { C->fl = (C->fl & ~ARITH) | f; }
 
+static uint32_t s_alu_a, s_alu_b;   // 直前の ALU 演算の 2 つの値（比較の記録用）
 static uint32_t alu(int op, uint32_t a, uint32_t b, int sz) {
     uint32_t mask = MASK(sz), sign = SIGN(sz);
     a &= mask; b &= mask;
+    s_alu_a = a; s_alu_b = b;
     uint32_t r = 0, f = 0;
     uint32_t c = C->fl & FL_CF;
     switch (op) {
@@ -241,12 +249,16 @@ static uint32_t shift(int op, uint32_t a, int cnt, int sz) {
 static inline void push16(uint16_t v) {
     uint16_t sp = (uint16_t)(C->r[ESP] - 2);
     C->r[ESP] = (C->r[ESP] & 0xFFFF0000u) | sp;
+    uint32_t fx = g_side_fx;   // スタックへの積み下ろしは空回りの判定に数えない（戻れば同じ状態）
     mem_ww(M, sbase(SS_) + sp, v);
+    g_side_fx = fx;
 }
 static inline void push32(uint32_t v) {
     uint16_t sp = (uint16_t)(C->r[ESP] - 4);
     C->r[ESP] = (C->r[ESP] & 0xFFFF0000u) | sp;
+    uint32_t fx = g_side_fx;
     mem_wd(M, sbase(SS_) + sp, v);
+    g_side_fx = fx;
 }
 static inline uint16_t pop16() {
     uint16_t sp = (uint16_t)C->r[ESP];
@@ -474,6 +486,7 @@ static void undefined(uint8_t op, uint8_t op2) {
 // ---- 0F xx ------------------------------------------------------------------
 static void op0f() {
     uint8_t op = f8();
+    s_op0f = op;
     int sz = d_o32 ? 32 : 16;
     if (op >= 0x80 && op <= 0x8F) {
         int32_t disp = d_o32 ? (int32_t)f32() : (int16_t)f16();
@@ -608,7 +621,7 @@ static void step() {
     }
     if (s_tr_on && C->ip == s_tr_ip && C->sr[CS_] == s_tr_cs) { s_tr_on = 0; fprintf(stderr, "   -> AX=%04X BX=%04X CX=%04X DX=%04X FL=%04X\n", C->r[EAX] & 0xFFFF, C->r[EBX] & 0xFFFF, C->r[ECX] & 0xFFFF, C->r[EDX] & 0xFFFF, C->fl & 0xFFFF); }
     C->op_ip = C->ip; C->op_cs = C->sr[CS_];
-    if (C->sr[CS_] == g_prof_cs && g_prof) g_prof[C->ip]++;
+    if (g_prof) { if (g_prof_cs == -2) g_prof[C->sr[CS_]]++; else if (C->sr[CS_] == g_prof_cs) g_prof[C->ip]++; }
     d_seg = -1; d_o32 = false; d_a32 = false; d_rep = 0;
     d_cyc = 2;
     uint8_t op;
@@ -629,6 +642,7 @@ static void step() {
         break;
     }
     int vsz = d_o32 ? 32 : 16;
+    s_op = op; s_vsz = vsz;
 
     // ALU 0x00-0x3F の規則的な部分
     if (op < 0x40 && (op & 7) < 6) {
@@ -742,6 +756,7 @@ static void step() {
     case 0xA0: case 0xA1: case 0xA2: case 0xA3: {
         uint32_t off = d_a32 ? f32() : f16();
         uint32_t a = sbase(d_seg >= 0 ? d_seg : DS_) + off;
+        s_moffs = a;
         int sz = (op & 1) ? vsz : 8;
         if (op < 0xA2) setr(sz, EAX, rdm(sz, a)); else wrm(sz, a, getr(sz, EAX));
         return; }
@@ -877,18 +892,275 @@ void cpu_reset(Cpu* c, Machine* m) {
     c->sr[CS_] = 0xF000; c->ip = 0xFFF0;
 }
 
+// ---- 空回りの見分け ------------------------------------------------------------
+//  「割込みが来るまで同じところを回るだけ」のループ（タイマ割込みで増えるカウンタを待つ など）を見つけたら、
+//  HLT と同じく割込みが来るまで命令を実行しない（早送り・CPU 負荷の軽減）。
+//  短い後ろ向きの分岐で同じ場所に戻ってきたとき、前回からレジスタ・フラグ・セグメントが同じで、
+//  その間にメモリへの書き込み・I/O・HLE・RAM 以外の読み出しが一度も無ければ、次の周回も必ず同じになる
+//  （変わりうるのは割込みだけ）ので、止めても結果は変わらない。I/O を読むループ（VSYNC 待ちなど）は対象外。
+int g_idle_skip = 1;
+unsigned g_spin_hits = 0;
+struct SpinSlot {
+    bool valid; uint16_t cs, ip; uint32_t fx;
+    uint32_t r[8]; uint16_t sr[6]; uint32_t fl;
+};
+static SpinSlot s_spin[8];   // ループの戻り先ごと（入れ子のループでも外側を見分けられるように）
+static inline bool spin_same(const SpinSlot& s) {
+    if (s.fl != C->fl) return false;
+    for (int i = 0; i < 8; i++) if (s.r[i] != C->r[i]) return false;
+    for (int i = 0; i < 6; i++) if (s.sr[i] != C->sr[i]) return false;
+    return true;
+}
+static inline void spin_record(SpinSlot& s) {
+    s.valid = true; s.cs = C->sr[CS_]; s.ip = C->ip; s.fx = g_side_fx;
+    for (int i = 0; i < 8; i++) s.r[i] = C->r[i];
+    for (int i = 0; i < 6; i++) s.sr[i] = C->sr[i];
+    s.fl = C->fl;
+}
+static inline void spin_clear() { for (auto& s : s_spin) s.valid = false; }
+
+// ---- ディスクの読み込み結果を調べる比較の記録 -----------------------------------
+//  INT 1Bh の後しばらく、①読んだバッファ（とそこから MOVS で写した先）の中身、②そこから読み込んだレジスタ、
+//  ③INT 1Bh の結果（AH）や READ ID の C/H/R/N を「どの命令で何と比べたか」を PC98PLAYER.LOG に残す。
+//  プロテクトの確認（読んだセクタの内容や結果コードを決まった値と比べる）を見つけるため。
+struct DwRange { uint32_t start, len, base_off; };   // base_off: 元のバッファの何バイト目にあたるか
+struct DwTaint { bool on; uint8_t val; char label[40]; };
+static struct {
+    bool active = false;
+    int64_t left = 0;             // 残りの命令数
+    int lines = 0;                // このディスク読み込みで書いた行数
+    std::vector<DwRange> ranges;
+    DwTaint t[8];                 // 8 ビットレジスタ AL,CL,DL,BL,AH,CH,DH,BH
+} s_dw;
+static int s_dw_total = 0;
+static const int DW_INSNS = 2000000, DW_LINES = 64, DW_TOTAL = 4000;
+
+void cpu_dw_begin(uint32_t buf, uint32_t len, const char* what) {
+    if (s_dw_total >= DW_TOTAL) return;
+    s_dw.active = true; s_dw.left = DW_INSNS; s_dw.lines = 0;
+    s_dw.ranges.clear();
+    for (auto& t : s_dw.t) t.on = false;
+    if (len) s_dw.ranges.push_back({buf, len, 0});
+    (void)what;
+}
+void cpu_dw_taint8(int r8, uint8_t val, const char* label) {
+    if (r8 < 0 || r8 > 7) return;
+    DwTaint& t = s_dw.t[r8];
+    t.on = true; t.val = val; snprintf(t.label, sizeof(t.label), "%s", label);
+}
+static int dw_find(uint32_t a, uint32_t* off) {
+    for (size_t i = 0; i < s_dw.ranges.size(); i++) {
+        const DwRange& r = s_dw.ranges[i];
+        if (a >= r.start && a < r.start + r.len) { if (off) *off = r.base_off + (a - r.start); return (int)i; }
+    }
+    return -1;
+}
+static const char* r8name(int r) { static const char* n[] = {"AL", "CL", "DL", "BL", "AH", "CH", "DH", "BH"}; return n[r & 7]; }
+static const char* r16name(int r) { static const char* n[] = {"AX", "CX", "DX", "BX", "SP", "BP", "SI", "DI"}; return n[r & 7]; }
+static const char* r32name(int r) { static const char* n[] = {"EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI"}; return n[r & 7]; }
+// 8 ビットレジスタ番号 → 32 ビットレジスタの何バイト目か
+static inline int r8_of(int reg, int byte) { return byte == 0 ? reg : (reg < 4 ? reg + 4 : -1); }
+// レジスタの値の出どころ（印が付いていて、値が今も同じなら説明を返す）
+static bool dw_reg_src(int sz, int reg, uint32_t v, char* out, size_t n) {
+    if (sz == 8) {
+        const DwTaint& t = s_dw.t[reg & 7];
+        if (t.on && t.val == (uint8_t)v) { snprintf(out, n, "%s", t.label); return true; }
+        return false;
+    }
+    if (reg >= 4) return false;
+    const DwTaint& lo = s_dw.t[reg], &hi = s_dw.t[reg + 4];
+    bool l = lo.on && lo.val == (uint8_t)v, h = hi.on && hi.val == (uint8_t)(v >> 8);
+    if (l && h) snprintf(out, n, "%s・%s", lo.label, hi.label);
+    else if (l) snprintf(out, n, "下位が %s", lo.label);
+    else if (h) snprintf(out, n, "上位が %s", hi.label);
+    else return false;
+    return true;
+}
+static void dw_set_reg(int sz, int reg, uint32_t lin_src, bool from_mem) {
+    // MOV などで reg に値が入った: 見張っているメモリからなら印を付け、そうでなければ消す
+    int bytes = sz / 8; if (bytes > 2) bytes = 2;
+    for (int b = 0; b < bytes; b++) {
+        int r8 = sz == 8 ? (reg & 7) : r8_of(reg, b);
+        if (r8 < 0) continue;
+        uint32_t off;
+        DwTaint& t = s_dw.t[r8];
+        if (from_mem && dw_find(lin_src + (uint32_t)b, &off) >= 0) {
+            t.on = true; t.val = mem_rb(M, lin_src + (uint32_t)b);
+            snprintf(t.label, sizeof(t.label), "読んだデータ+%03Xh", off);
+        } else t.on = false;
+    }
+}
+static void dw_copy_reg(int sz, int dst, int src) {
+    if (sz == 8) { s_dw.t[dst & 7] = s_dw.t[src & 7]; return; }
+    for (int b = 0; b < 2; b++) {
+        int d = r8_of(dst, b), s2 = r8_of(src, b);
+        if (d < 0) continue;
+        if (s2 < 0) s_dw.t[d].on = false; else s_dw.t[d] = s_dw.t[s2];
+    }
+}
+static void dw_line(const char* kind, const std::string& a, const std::string& b, int sz) {
+    uint32_t va = s_alu_a, vb = s_alu_b;
+    const char* res;
+    if (!strcmp(kind, "TEST")) res = (va & vb) ? "どれかのビットが立っている（非 0）" : "共通のビットなし（0）";
+    else res = va == vb ? "等しい" : va < vb ? "小さい（符号なし）" : "大きい（符号なし）";
+    plog("[fdchk] %04X:%04X %s %s と %s（%d ビット）→ %s\n", C->op_cs, C->op_ip, kind, a.c_str(), b.c_str(), sz, res);
+    s_dw.lines++; s_dw_total++;
+    if (s_dw.lines >= DW_LINES || s_dw_total >= DW_TOTAL) {
+        plog("[fdchk] （記録はここまで: %s）\n", s_dw_total >= DW_TOTAL ? "全体の上限" : "この読み込みについての上限");
+        s_dw.active = false;
+    }
+}
+// 比べた値の 1 つを言葉にする（rm のメモリ／レジスタ）
+static bool dw_desc_rm(int sz, uint32_t v, std::string* out) {
+    char b[160], src[64];
+    unsigned mask = sz == 8 ? 0xFF : sz == 16 ? 0xFFFF : 0xFFFFFFFFu;
+    if (!d_isreg) {
+        uint32_t off;
+        bool hit = dw_find(d_ea, &off) >= 0;
+        snprintf(b, sizeof(b), "[%05X]=%0*Xh%s", d_ea & 0xFFFFF, sz / 4, v & mask, "");
+        *out = b;
+        if (hit) { snprintf(b, sizeof(b), "（読んだデータ+%03Xh）", off); *out += b; }
+        return hit;
+    }
+    const char* nm = sz == 8 ? r8name(d_rm) : sz == 16 ? r16name(d_rm) : r32name(d_rm);
+    bool hit = dw_reg_src(sz, d_rm, v, src, sizeof(src));
+    snprintf(b, sizeof(b), "%s=%0*Xh", nm, sz / 4, v & mask);
+    *out = b;
+    if (hit) { *out += "（"; *out += src; *out += "）"; }
+    return hit;
+}
+static bool dw_desc_reg(int sz, int reg, uint32_t v, std::string* out) {
+    char b[96], src[64];
+    unsigned mask = sz == 8 ? 0xFF : sz == 16 ? 0xFFFF : 0xFFFFFFFFu;
+    const char* nm = sz == 8 ? r8name(reg) : sz == 16 ? r16name(reg) : r32name(reg);
+    bool hit = dw_reg_src(sz, reg, v, src, sizeof(src));
+    snprintf(b, sizeof(b), "%s=%0*Xh", nm, sz / 4, v & mask);
+    *out = b;
+    if (hit) { *out += "（"; *out += src; *out += "）"; }
+    return hit;
+}
+static std::string dw_imm(int sz, uint32_t v) {
+    char b[32]; unsigned mask = sz == 8 ? 0xFF : sz == 16 ? 0xFFFF : 0xFFFFFFFFu;
+    snprintf(b, sizeof(b), "%0*Xh", sz / 4, v & mask); return b;
+}
+struct DwPre { uint16_t si, di, cx; int seg; };
+#if defined(__GNUC__)
+#define DW_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define DW_UNLIKELY(x) (x)
+#endif
+static void dw_after(const DwPre& pre) {
+    uint8_t op = s_op;
+    int vsz = s_vsz;
+    std::string a, b;
+    switch (op) {
+    case 0x38: case 0x39: case 0x3A: case 0x3B: {
+        int sz = (op & 1) ? vsz : 8;
+        bool rmfirst = op <= 0x39;
+        uint32_t vrm = rmfirst ? s_alu_a : s_alu_b, vrg = rmfirst ? s_alu_b : s_alu_a;
+        bool h1 = dw_desc_rm(sz, vrm, &a), h2 = dw_desc_reg(sz, d_reg, vrg, &b);
+        if (h1 || h2) { if (rmfirst) dw_line("CMP", a, b, sz); else dw_line("CMP", b, a, sz); }
+        return; }
+    case 0x3C: case 0x3D: case 0xA8: case 0xA9: {
+        int sz = (op & 1) ? vsz : 8;
+        if (dw_desc_reg(sz, EAX, s_alu_a, &a)) dw_line(op >= 0xA8 ? "TEST" : "CMP", a, dw_imm(sz, s_alu_b), sz);
+        return; }
+    case 0x80: case 0x81: case 0x82: case 0x83: {
+        if (d_reg != 7) { if (d_isreg) { int sz = op == 0x80 || op == 0x82 ? 8 : vsz; dw_set_reg(sz, d_rm, 0, false); } return; }
+        int sz = (op == 0x80 || op == 0x82) ? 8 : vsz;
+        if (dw_desc_rm(sz, s_alu_a, &a)) dw_line("CMP", a, dw_imm(sz, s_alu_b), sz);
+        return; }
+    case 0x84: case 0x85: {
+        int sz = (op & 1) ? vsz : 8;
+        bool h1 = dw_desc_rm(sz, s_alu_a, &a), h2 = dw_desc_reg(sz, d_reg, s_alu_b, &b);
+        if (h1 || h2) dw_line("TEST", a, b, sz);
+        return; }
+    case 0xF6: case 0xF7: {
+        if (d_reg > 1) return;
+        int sz = (op & 1) ? vsz : 8;
+        if (dw_desc_rm(sz, s_alu_a, &a)) dw_line("TEST", a, dw_imm(sz, s_alu_b), sz);
+        return; }
+    case 0x8A: case 0x8B: {
+        int sz = (op & 1) ? vsz : 8;
+        if (d_isreg) dw_copy_reg(sz, d_reg, d_rm); else dw_set_reg(sz, d_reg, d_ea, true);
+        return; }
+    case 0xA0: case 0xA1: dw_set_reg((op & 1) ? vsz : 8, EAX, s_moffs, true); return;
+    case 0xAC: case 0xAD: {
+        if (d_rep) return;
+        dw_set_reg((op & 1) ? vsz : 8, EAX, ((uint32_t)C->sr[pre.seg] << 4) + pre.si, true);
+        return; }
+    case 0xA4: case 0xA5: {   // MOVS: 見張っている所から写したら、写し先も見張る
+        uint32_t src = ((uint32_t)C->sr[pre.seg] << 4) + pre.si, dst = ((uint32_t)C->sr[ES_] << 4) + pre.di;
+        uint32_t n = (d_rep ? pre.cx : 1) * (uint32_t)((op & 1) ? vsz / 8 : 1);
+        uint32_t off;
+        if (n && !(C->fl & FL_DF) && dw_find(src, &off) >= 0 && dw_find(dst, nullptr) < 0 && s_dw.ranges.size() < 16) {
+            s_dw.ranges.push_back({dst, n, off});
+            plog("[fdchk] %04X:%04X 読んだデータ+%03Xh から %u バイトを [%05X] へ写した（写し先も見張る）\n", C->op_cs, C->op_ip, off, n, dst);
+        }
+        return; }
+    case 0xA6: case 0xA7: case 0xAE: case 0xAF: {   // CMPS / SCAS
+        int unit = (op & 1) ? vsz / 8 : 1;
+        uint32_t src = ((uint32_t)C->sr[pre.seg] << 4) + pre.si, dst = ((uint32_t)C->sr[ES_] << 4) + pre.di;
+        uint32_t done = d_rep ? (uint32_t)(pre.cx - (uint16_t)C->r[ECX]) : 1;
+        uint32_t o1, o2;
+        bool cmps = op <= 0xA7;
+        bool h1 = cmps && dw_find(src, &o1) >= 0, h2 = dw_find(dst, &o2) >= 0;
+        if (!h1 && !h2) return;
+        char line[400]; int k = 0;
+        k += snprintf(line + k, sizeof(line) - k, "[fdchk] %04X:%04X %s%s ", C->op_cs, C->op_ip, d_rep == 0xF3 ? "REPE " : d_rep == 0xF2 ? "REPNE " : "", cmps ? "CMPS" : "SCAS");
+        if (cmps) {
+            k += snprintf(line + k, sizeof(line) - k, "[%05X]%s と [%05X]%s を %u 単位比べた:", src, h1 ? "（読んだデータ）" : "", dst, h2 ? "（読んだデータ）" : "", done);
+            for (uint32_t i = 0; i < done * unit && i < 12 && k < 330; i++) k += snprintf(line + k, sizeof(line) - k, " %02X/%02X", mem_rb(M, src + i), mem_rb(M, dst + i));
+        } else {
+            k += snprintf(line + k, sizeof(line) - k, "%s=%Xh を [%05X]（読んだデータ+%03Xh）から %u 単位探した", unit == 1 ? "AL" : "AX", unit == 1 ? (C->r[EAX] & 0xFF) : (C->r[EAX] & 0xFFFF), dst, o2, done);
+        }
+        snprintf(line + k, sizeof(line) - k, " → %s\n", (C->fl & FL_ZF) ? "最後は等しい" : "最後は違う");
+        plog("%s", line);
+        if (++s_dw.lines >= DW_LINES) s_dw.active = false;
+        s_dw_total++;
+        return; }
+    case 0x0F:
+        if (s_op0f == 0xB6 || s_op0f == 0xB7) { if (!d_isreg) dw_set_reg(s_op0f == 0xB6 ? 8 : 16, d_reg, d_ea, true); }
+        return;
+    }
+    if (op >= 0xB0 && op <= 0xB7) { s_dw.t[op & 7].on = false; return; }
+    if (op >= 0xB8 && op <= 0xBF) { dw_set_reg(16, op & 7, 0, false); return; }
+}
+
+// 比較を記録している間の 1 命令（ふだんの経路を重くしないよう別の関数にする）
+#if defined(__GNUC__)
+__attribute__((noinline))
+#elif defined(_MSC_VER)
+__declspec(noinline)
+#endif
+static void step_dw() {
+    DwPre pre = {(uint16_t)C->r[ESI], (uint16_t)C->r[EDI], (uint16_t)C->r[ECX], DS_};
+    step();
+    if (d_seg >= 0) pre.seg = d_seg;
+    dw_after(pre);
+    if (--s_dw.left <= 0) s_dw.active = false;
+}
+
 int cpu_run(Cpu* c, int budget) {
     C = c; M = c->m;
     int used = 0;
     while (used < budget) {
         if (g_irq_hint && (C->fl & FL_IF) && !C->inhibit_irq) {
             int v = pic_acknowledge(M);
-            if (v >= 0) { C->halted = 0; d_cyc = 0; do_int((uint8_t)v); used += d_cyc; }
+            if (v >= 0) { C->halted = 0; d_cyc = 0; do_int((uint8_t)v); used += d_cyc; spin_clear(); }
         }
         C->inhibit_irq = 0;
         if (C->halted) { used = budget; break; }
-        step();
+        uint16_t cs0 = C->sr[CS_], ip0 = C->ip;
+        if (DW_UNLIKELY(s_dw.active)) step_dw(); else step();
         used += d_cyc;
+        // 短い後ろ向きの分岐（ループの戻り）
+        if (C->sr[CS_] == cs0 && C->ip < ip0 && (uint16_t)(ip0 - C->ip) <= 64 && g_idle_skip) {
+            SpinSlot& sp = s_spin[(C->ip ^ (C->ip >> 3)) & 7];
+            if (sp.valid && sp.cs == cs0 && sp.ip == C->ip && sp.fx == g_side_fx && spin_same(sp)) {
+                if (C->fl & FL_IF) { C->halted = 1; spin_clear(); used = budget; g_spin_hits++; break; }
+            } else spin_record(sp);
+        }
     }
     C->cycles += used;
     return used;

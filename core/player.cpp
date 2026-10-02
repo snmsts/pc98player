@@ -78,6 +78,7 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
     ps->cfg.fm_enable = I("SOUND", 1) != 0;
     ps->cfg.memory_kb = I("MEMORYKB", 640);
     ps->cfg.emulate_mouse = I("MOUSEDRIVER", 1) != 0;
+    ps->cfg.idle_skip = I("IDLESKIP", 1) != 0;
     ps->cfg.trace = I("TRACE", 0);
     ps->cfg.key_repeat = I("KEYREPEAT", 1);
     std::string ver = G("DOSVERSION", "5.00");
@@ -127,7 +128,17 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
         ps->cfg.midi_speed = sp < 10 ? 10 : sp > 1000 ? 1000 : sp;
     }
     ps->midi_device = I("MIDIDEVICE", -1);
-    ps->cfg.floppy_image = G("FLOPPYIMAGE", "");
+    // FloppyDisk= と FloppyImage= は同じ意味（実機のドライブも指せるので FloppyDisk= の名前も用意した）。
+    // 両方あれば FloppyDisk= を使う
+    ps->cfg.floppy_image = G("FLOPPYDISK", "");
+    if (ps->cfg.floppy_image.empty()) ps->cfg.floppy_image = G("FLOPPYIMAGE", "");
+    ps->cfg.floppy_image2 = G("FLOPPYDISK2", "");   // ブートモードの 2 台目のドライブ
+    if (ps->cfg.floppy_image2.empty()) ps->cfg.floppy_image2 = G("FLOPPYIMAGE2", "");
+    {   // Boot=FD: MS-DOS を使わず、1 台目のフロッピーの IPL から起動する（DOS 以前の独自形式のディスク）
+        std::string b = G("BOOT", "");
+        for (auto& c : b) c = (char)toupper((unsigned char)c);
+        ps->cfg.boot_fd = b == "FD" || b == "FLOPPY" || b == "1";
+    }
     floppy::set_gw_options(G("GWDRIVE", "A"), I("GWREVS", 3));
     floppy::set_force_wprot(I("FLOPPYWRITEPROTECT", 0) != 0);   // 1: 入れるフロッピーを必ず書き込み禁止にする   // Greaseweazle のドライブと、1 トラックを何回転読むか
     {
@@ -144,6 +155,15 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
         // ゲームのドライブと重なったらずらす（Drive=B, FloppyDrive=A のようにフロッピーを A: にもできる）
         if (c == ps->cfg.drive) c = (char)(c == 'Z' ? 'A' : c + 1);
         ps->cfg.floppy_drive = c;
+        // 2 台目のフロッピーのドライブ名（FloppyDisk2= を書いたときに使う）。空なら 1 台目の次の空いている名前
+        std::string f2 = G("FLOPPYDRIVE2", "");
+        char c2 = f2.empty() ? 0 : (char)toupper((unsigned char)f2[0]);
+        if (c2 < 'A' || c2 > 'Z' || c2 == ps->cfg.drive || c2 == c) c2 = 0;
+        if (!c2 && !ps->cfg.floppy_image2.empty()) {
+            for (char k = (char)(c + 1); k != c; k = (char)(k == 'Z' ? 'A' : k + 1))
+                if (k != ps->cfg.drive) { c2 = k; break; }
+        }
+        ps->cfg.floppy_drive2 = c2;
     }
     ps->cfg.ems = I("EMS", 1) != 0;
     ps->cfg.ems_kb = I("EMSKB", 4096);
@@ -151,13 +171,14 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
     if (ps->cfg.ems_kb > 32768) ps->cfg.ems_kb = 32768;
     ps->cfg.xms_kb = I("XMS", 1) ? I("XMSKB", 8192) : 0;
     if (ps->cfg.xms_kb > 65535) ps->cfg.xms_kb = 65535;
-    return !ps->cfg.start.empty();
+    return !ps->cfg.start.empty() || ps->cfg.boot_fd;
 }
 
 bool Player::init(const PlayerSettings& s, std::string* err) {
     ps = s;
     fontrom_set_jis78(ps.jis78);
     floppy::set_drive_letter(ps.cfg.floppy_drive);   // DOS のドライブ表を作る前に決めておく
+    floppy::set_drive_letter_unit(1, ps.cfg.boot_fd ? 0 : ps.cfg.floppy_drive2);
     m = machine_create(ps.cfg);
     floppy::eject();
     if (!ps.cfg.floppy_image.empty()) {
@@ -180,6 +201,26 @@ bool Player::init(const PlayerSettings& s, std::string* err) {
             hostfs::close(h);
             if (n > 0) opna->set_rhythm_rom(d.data(), n);
         }
+    }
+    floppy::eject_unit(1);
+    if (!ps.cfg.floppy_image2.empty()) {   // 2 台目のドライブ
+        std::string e;
+        if (!floppy::insert_unit(1, floppy_host_path(ps.cfg.root, ps.cfg.floppy_image2), &e)) {
+            floppy_error = "2 台目のフロッピーを入れられません: " + ps.cfg.floppy_image2 + "（" + e + "）";
+            plog("[fd] %s\n", floppy_error.c_str());
+        }
+    }
+    if (ps.cfg.boot_fd) {
+        // ブートモード: 1 台目の IPL から起動する
+        std::string why;
+        if (!bios_boot_fd(m, &why)) {
+            m->status = "フロッピーから起動できません: " + why;
+            m->quit = 2;
+            m->cpu.halted = 1;
+            plog("[boot] %s\n", m->status.c_str());
+        }
+        (void)err;
+        return true;
     }
     std::string cmd = ps.cfg.start;
     if (!ps.cfg.args.empty()) cmd += " " + ps.cfg.args;
@@ -220,7 +261,9 @@ void Player::midi_feed(uint8_t b) {
     if (midi_need && --midi_need == 0) { emit(); midi_msg.clear(); }
 }
 
-void Player::run_frame(bool render_video) {
+static const float k_opna_makeup = 4.0f;   // +12dB
+
+void Player::run_frame(bool render_video, bool render_audio) {
     uint64_t t0 = m->ticks;
     machine_run_frame(m);
     floppy::idle();
@@ -233,7 +276,7 @@ void Player::run_frame(bool render_video) {
     float vol = ps.volume / 100.0f;
     float pvol = ps.pcm_volume / 100.0f * (m->pcm86.vol / 15.0f) * 0.6f / 32768.0f;
     float bvol = ps.beep_volume / 100.0f * 0.15f;
-    while (true) {
+    while (render_audio) {
         double ts = (double)t0 + sample_acc;
         if (ts >= (double)t1) break;
         while (wi < m->regw.size() && (double)m->regw[wi].tick <= ts) {
@@ -248,6 +291,11 @@ void Player::run_frame(bool render_video) {
         }
         float l = 0, r = 0;
         opna->render_one(&l, &r);
+        // 音源（FM・SSG・リズム）の基準の大きさ。ymfm の出力をそのまま使うと、実曲のピークが
+        // フルスケールの 0.05〜0.1 程度（平均は -30〜-45dBFS）しか出ず、ほかのアプリと並べると
+        // Volume=100 ではほとんど聞こえない。+12dB 持ち上げて、ふつうの音量で聞こえる大きさにする
+        //（大きな山は下のソフトリミッタで丸める）。
+        l *= k_opna_makeup; r *= k_opna_makeup;
         if (pi < m->pcm_out.size() || pcm_l || pcm_r) {
             // PCM86: この標本の時刻までに出た PCM 標本の平均（無ければ直前の値を保つ）
             int n = 0; int32_t sl = 0, sr = 0;
@@ -287,7 +335,7 @@ void Player::run_frame(bool render_video) {
     m->pcm_out.clear();
     m->regw.clear();
     m->beepw.clear();
-    sample_acc -= (double)(t1 - t0);
+    if (render_audio) sample_acc -= (double)(t1 - t0);
     if (render_video) {
         video_render(m, fb);
         // INT 33h のカーソル（AX=1 で表示にしたゲームだけ）。実機のドライバと同じ形を VRAM ではなく画面に重ねる
@@ -315,6 +363,21 @@ void Player::shutdown() {
     machine_destroy(m); m = nullptr;
 }
 
+bool Player::reboot(std::string* err) {
+    PlayerSettings s = ps;
+    s.cfg.floppy_image = floppy::current_path();   // 今入っているディスクを入れたまま起動し直す
+    s.cfg.floppy_image2 = floppy::current_path_unit(1);
+    return reboot(s, err);
+}
+
+bool Player::reboot(const PlayerSettings& s0, std::string* err) {
+    PlayerSettings s = s0;
+    shutdown();
+    sample_acc = 0; beep_phase = 0; beep_state = false; pcm_l = pcm_r = 0;
+    floppy_error.clear();
+    return init(s, err);
+}
+
 // ---- ステートセーブ ----------------------------------------------------------
 //  形式: "P98S" 版(4) 時刻文字列 縮小画像(160x100 RGB) 本体の長さ(4) 本体
 static const uint32_t STATE_VERSION = 1;
@@ -335,6 +398,8 @@ void Player::snapshot(std::vector<uint8_t>& out) {
     std::vector<uint8_t> chip;
     opna->save_chip(chip);
     w.u32((uint32_t)chip.size()); w.bytes(chip.data(), chip.size());
+    w.tag("FD2 ");                                   // 2 台目のドライブ（ブートモード）
+    w.str(floppy::current_path_unit(1));
     w.tag("END ");
     out.swap(w.b);
 }
@@ -350,6 +415,15 @@ bool Player::restore(const uint8_t* data, size_t len) {
     uint32_t clen = r.u32();
     std::vector<uint8_t> chip;
     if (r.ok && clen <= 16 * 1024 * 1024) { chip.resize(clen); r.bytes(chip.data(), clen); } else r.ok = false;
+    if (r.ok && r.peek_tag("FD2 ")) {
+        r.tag("FD2 ");
+        std::string fp = r.str();
+        if (fp.empty()) floppy::eject_unit(1);
+        else if (fp != floppy::current_path_unit(1)) {
+            std::string e;
+            if (!floppy::insert_unit(1, fp, &e)) plog("[state] 2 台目のフロッピーを入れ直せません: %s (%s)\n", fp.c_str(), e.c_str());
+        }
+    }
     r.tag("END ");
     if (!r.ok) return false;
     // 音源チップ: 内部状態があれば丸ごと戻す（鳴りかけの音の余韻まで一致する）。

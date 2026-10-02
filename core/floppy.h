@@ -111,10 +111,28 @@ namespace floppy {
     // 入れる／取り出す（drive = 'B' など。ユニット 0 に入る）。err に理由
     bool insert(const std::string& path, std::string* err);
     void eject();
-    FloppyImage* image();                 // 入っていなければ nullptr
+    FloppyImage* image();
+    // ドライブ（ユニット）を指定して入れる／取り出す。0 = 上と同じ、1 = 2 台目（ブートモード用。DOS からは見えない）
+    bool insert_unit(int unit, const std::string& path, std::string* err);
+    void eject_unit(int unit);
+    FloppyImage* image_unit(int unit);
+    std::string current_path_unit(int unit);
+    // イメージの中身を調べる（読めなければ false）。dos = MS-DOS のファイル表がある、bootable = IPL がある
+    bool probe_image(const std::string& path, bool* dos, bool* bootable);                 // 入っていなければ nullptr（フォルダを入れているときも nullptr）
+    // フォルダを入れているとき、そのホストのパス（空 = フォルダではない）。
+    // FloppyImage= にフォルダ名を書くと、そのフォルダをフロッピーのドライブとしてそのまま見せる
+    //（ファイルを確かめるだけのキーディスク向け。セクタ単位の読み書きはできない）
+    const std::string& folder();
+    // 入っているもの（イメージのパス・実機の名前・フォルダ）。空 = 入っていない
+    std::string current_path();
     char drive_letter();                  // DOS のドライブ名（0 = 使わない）
     void set_drive_letter(char c);
-    uint32_t change_count();              // 入れ替えるたびに増える（DOS のキャッシュを捨てる目印）
+    uint32_t change_count();              // 入れ替えるたびに増える（DOS のキャッシュを捨てる目印）。どちらのドライブでも
+    uint32_t change_count_unit(int unit); // そのドライブ（ユニット）だけの入れ替え回数
+    // 2 台目のドライブにも DOS のドライブ名を付けられる（FloppyDrive2=）。0 = 付けない
+    char drive_letter_unit(int unit);
+    void set_drive_letter_unit(int unit, char c);
+    int  unit_of_letter(char c);          // そのドライブ名のフロッピーのユニット（-1 = フロッピーではない）
     void bios_int1b(Machine* m);          // INT 1Bh のフロッピー部分
     bool is_fd_da(uint8_t al);            // AL（DA/UA）がフロッピーか
     // 実機のドライブを表す名前か（"FDD:A" "\\.\A:" "GW" "GW:COM5" 等）。ファイル名ではないのでパスを付けない
@@ -166,5 +184,8 @@ namespace fatfs {
     bool  free_space(uint32_t* spc, uint32_t* bps, uint32_t* free_clusters, uint32_t* total_clusters);
     // ボリュームラベル（DOS の検索で返す形 "NAME.EXT"）。無ければ false
     bool  volume_label(std::string* name, uint16_t* date, uint16_t* time);
+    // ドライブを指定して（2 台目のフロッピー用）
+    bool  free_space_drive(char drive, uint32_t* spc, uint32_t* bps, uint32_t* free_clusters, uint32_t* total_clusters);
+    bool  volume_label_drive(char drive, std::string* name, uint16_t* date, uint16_t* time);
     void  reset();                        // ディスク交換時
 }

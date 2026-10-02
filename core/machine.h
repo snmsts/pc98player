@@ -132,12 +132,16 @@ struct Config {
     bool     fm_enable = true;
     int      memory_kb = 640;
     bool     emulate_mouse = true;
+    bool     idle_skip = true;       // 割込み待ちの空回りを止めて待つ（IdleSkip=）
     int      key_repeat = 1;
     int      trace = 0;
     int      dos_version = 0x0500;   // 5.00（上位=メジャー）
     int      fake_year = 0;          // 0 以外: 年だけこの値に置き換える（2000 年問題対策）
     std::string floppy_image;        // 起動時に入れるフロッピーイメージ（空なら無し）
+    std::string floppy_image2;       // ブートモード: 2 台目のドライブに入れるイメージ
+    bool     boot_fd = false;        // ブートモード: MS-DOS を使わず、フロッピーの IPL から起動する
     char     floppy_drive = 'B';     // フロッピーのドライブ名
+    char     floppy_drive2 = 0;      // 2 台目のフロッピーのドライブ名（0 = DOS からは見せない）
     char     current_drive = 0;      // 起動時のカレントドライブ（0 = Start= のドライブ、無ければゲームのドライブ）
     int      free_mb = 96;           // ゲームのドライブの空き容量として見せる大きさ（MB）
     int      fake_date = 0;          // 0 以外: YYYYMMDD。起動した日をこの日付として、以後は実時間で進める
@@ -212,6 +216,7 @@ struct Machine {
     std::vector<PcmSample> pcm_out;  // PCM86 の出力（フレームごとに Player が取り出す）
     std::vector<uint8_t> midi_out;   // ホストへ送る MIDI バイト列（フレームごとに取り出す）
     Mouse    mouse;
+    uint8_t  joy = 0;           // ジョイスティック（ホストが毎フレーム設定。1=押している: bit0 上 1 下 2 左 3 右 4 A 5 B）
     MouseDrv mdrv;
     Config   cfg;
 
@@ -276,6 +281,7 @@ void     machine_raise_irq(Machine* m, int irq);
 void     machine_eoi(Machine* m, int irq);
 void     machine_key(Machine* m, uint8_t scancode, bool down);
 void     machine_mouse(Machine* m, int dx, int dy, int buttons);
+void     machine_joystick(Machine* m, uint8_t bits);   // bits: machine.joy と同じ並び
 void     pic_update_hint(Machine* m);
 void     opna_write(Machine* m, int part, uint8_t addr, uint8_t val);
 int      pit0_hz_ok(Machine* m);
@@ -309,6 +315,10 @@ uint16_t machine_file_date(Machine* m, uint16_t dos_date);   // ファイルの�
 
 // bios.cpp
 void bios_init(Machine* m);
+// ブートモード: ユニット 0 のフロッピーの IPL を読み込んで、そこから実行を始める。読めなければ false と理由
+bool bios_boot_fd(Machine* m, std::string* why);
+// ブートモードで、ROM（N88-BASIC など、用意していない部分）へ飛び込んだか確かめる。飛び込んだら止める
+bool bios_rom_trap(Machine* m);
 void bios_hle(Machine* m, uint8_t n);
 void lio_init(Machine* m);
 void lio_hle(Machine* m, uint8_t n);
@@ -336,6 +346,10 @@ void dos_hle(Machine* m, uint8_t n);
 void shell_start(Machine* m, const std::string& cmdline);
 // INT DCh CL=0Ch/0Dh: ファンクションキー・編集キーに割り当てた文字列の取得／設定（DOS のコンソール入力で展開する）
 void dos_keytab_get(Machine* m, uint16_t ax, uint32_t addr);
+// メモリエディタ用: いま動いているゲーム（実行中のプログラムと、それを起動した親たち。シェルと常駐ドライバは除く）が
+// 持っているメモリブロック（MCB の中身の範囲、線形アドレス）
+struct DosMemBlock { uint32_t start, len; std::string name; };
+void dos_game_blocks(Machine* m, std::vector<DosMemBlock>& out);
 void dos_keytab_set(Machine* m, uint16_t ax, uint32_t addr);
 
 // 共通

@@ -455,12 +455,29 @@ namespace floppy {
 static FloppyImage* s_img = nullptr;
 static char s_letter = 'B';
 static uint32_t s_changes = 0;
+static char s_letter2 = 0;          // 2 台目のドライブの DOS のドライブ名（0 = DOS からは見せない）
+static uint32_t s_changes2 = 0;
 static int s_head_pos[4];          // 各ユニットのヘッド位置（シリンダ）
 static bool s_force_wp = false;
 void set_force_wprot(bool on) { s_force_wp = on; if (s_img && on) s_img->wprot = true; }
 bool force_wprot() { return s_force_wp; }
 
-bool insert(const std::string& path, std::string* err) {
+static std::string s_folder;
+const std::string& folder() { return s_folder; }
+std::string current_path() { return s_img ? s_img->path : s_folder; }
+
+bool insert(const std::string& path0, std::string* err) {
+    std::string path = path0;
+    // フォルダ: 末尾の区切りを除いてから確かめる（"C:\" のようなドライブの直下はそのまま）
+    while (path.size() > 3 && (path.back() == '\\' || path.back() == '/')) path.pop_back();
+    HostDirEntry de;
+    if (!is_device_spec(path) && hostfs::stat(path, de) && de.is_dir) {
+        delete s_img; s_img = nullptr;
+        s_folder = path;
+        s_changes++;
+        fatfs::reset();
+        return true;
+    }
     FloppyImage* im = new FloppyImage();
     if (is_device_spec(path)) {
         // 同じ実機を開き直すこともあるので、先に今のものを閉じる（ポートは同時に 1 つしか開けない）
@@ -473,15 +490,79 @@ bool insert(const std::string& path, std::string* err) {
     if (s_force_wp) im->wprot = true;
     delete s_img;
     s_img = im;
+    s_folder.clear();
     s_changes++;
     fatfs::reset();
     return true;
 }
-void eject() { delete s_img; s_img = nullptr; s_changes++; fatfs::reset(); }
+void eject() { delete s_img; s_img = nullptr; s_folder.clear(); s_changes++; fatfs::reset(); }
 FloppyImage* image() { return s_img; }
+
+// ユニット 1（2 台目のドライブ）。ブートモード（DOS を使わず IPL から起動するディスク）で使う。
+// DOS のドライブには出さない（INT 1Bh からだけ見える）
+static FloppyImage* s_img2 = nullptr;
+bool insert_unit(int unit, const std::string& path, std::string* err) {
+    if (unit == 0) return insert(path, err);
+    if (unit != 1) { if (err) *err = "ドライブの番号が違います"; return false; }
+    FloppyImage* im = new FloppyImage();
+    if (is_device_spec(path)) {
+        FdSource* src = fdreal_open(path, err);
+        if (!src) { delete im; return false; }
+        if (!im->open_source(src, path, fdreal_format_name(path), err)) { delete im; return false; }
+    } else if (!im->load(path, err)) { delete im; return false; }
+    if (s_force_wp) im->wprot = true;
+    delete s_img2; s_img2 = im;
+    s_changes2++;
+    fatfs::reset();
+    return true;
+}
+// イメージの中身を調べる: MS-DOS のファイル表（FAT）があるか、IPL（起動用のセクタ）があるか
+bool probe_image(const std::string& path, bool* dos, bool* bootable) {
+    *dos = false; *bootable = false;
+    FloppyImage im;
+    std::string e;
+    if (!im.load(path, &e)) return false;
+    FdTrack* t = im.track(0, 0);
+    if (!t || t->secs.empty()) return true;
+    const FdSector* b = nullptr;
+    for (auto& x : t->secs) if (!x.fm && x.r == 1) { b = &x; break; }
+    if (!b) for (auto& x : t->secs) if (x.r == 1) { b = &x; break; }
+    if (!b || b->data.empty()) return true;
+    bool same = true;
+    for (size_t i = 1; i < b->data.size() && same; i++) same = b->data[i] == b->data[0];
+    *bootable = !same;
+    if (b->fm || b->n == 0) return true;   // 先頭が FM 128 バイト = N88-BASIC などの形式（MS-DOS ではない）
+    const uint8_t* d = b->data.data();
+    if (b->data.size() >= 32) {
+        unsigned bps = d[11] | (d[12] << 8), spc = d[13], nf = d[16];
+        if (bps == (128u << (b->n & 7)) && spc >= 1 && spc <= 64 && (spc & (spc - 1)) == 0 && nf >= 1 && nf <= 2) { *dos = true; return true; }
+    }
+    // BPB の無い古い形式: 2 番目の論理セクタ（FAT の先頭）が F0〜FF FF FF で始まるか
+    std::vector<uint8_t> f((size_t)im.lsec_size);
+    if (im.lsec_size >= 4 && im.read_lba(1, f.data()) && f[0] >= 0xF0 && f[1] == 0xFF && f[2] == 0xFF) *dos = true;
+    return true;
+}
+
+void eject_unit(int unit) { if (unit == 0) eject(); else if (unit == 1) { delete s_img2; s_img2 = nullptr; s_changes2++; fatfs::reset(); } }
+FloppyImage* image_unit(int unit) { return unit == 0 ? s_img : unit == 1 ? s_img2 : nullptr; }
+std::string current_path_unit(int unit) { if (unit == 0) return current_path(); return (unit == 1 && s_img2) ? s_img2->path : std::string(); }
 char drive_letter() { return s_letter; }
 void set_drive_letter(char c) { if (c >= 'a' && c <= 'z') c = (char)(c - 32); s_letter = (c >= 'A' && c <= 'Z') ? c : 0; }
-uint32_t change_count() { return s_changes; }
+uint32_t change_count() { return s_changes + s_changes2 * 0x10000u; }   // どちらかのドライブが入れ替わると変わる
+uint32_t change_count_unit(int unit) { return unit == 0 ? s_changes : s_changes2; }
+char drive_letter_unit(int unit) { return unit == 0 ? s_letter : unit == 1 ? s_letter2 : 0; }
+void set_drive_letter_unit(int unit, char c) {
+    if (unit == 0) { set_drive_letter(c); return; }
+    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+    if (unit == 1) s_letter2 = (c >= 'A' && c <= 'Z') ? c : 0;
+}
+int unit_of_letter(char c) {
+    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+    if (!c) return -1;
+    if (c == s_letter) return 0;
+    if (c == s_letter2) return 1;
+    return -1;
+}
 static uint32_t s_last_access = 0;
 void poll_change() {
     if (!s_img || !s_img->src) return;
@@ -513,7 +594,41 @@ static bool media_ok(uint8_t al, const FloppyImage* im) {
     return hd;                                          // 1MB / 1.44MB の口
 }
 
+// 記録密度（AH の bit6 MF: 1=MFM 倍密度, 0=FM 単密度）が合うセクタか。
+// FM のセクタは MFM では読めない。MFM のセクタを FM で読むのは、そのトラックに FM のセクタがあるとき
+//（＝密度がきちんと記録されているイメージ）だけ断る（密度を記録していない形式で読めなくならないように）
+static bool density_ok(const FdSector& s, bool mf, const FdTrack* t) {
+    if (s.fm) return !mf;
+    if (mf) return true;
+    if (t) for (auto& x : t->secs) if (x.fm) return false;
+    return true;
+}
+
+static void bios_int1b_body(Machine* m);
+// INT 1Bh。Trace=1 のときは、その後でゲームが「読んだ内容・結果コード・ID」を何と比べたかを記録する（cpu.cpp）
 void bios_int1b(Machine* m) {
+    Cpu* c = &m->cpu;
+    uint8_t ah0 = (uint8_t)(c->r[EAX] >> 8), cmd = ah0 & 0x0F;
+    uint32_t buf = ((uint32_t)c->sr[ES_] << 4) + (uint16_t)c->r[EBP];
+    uint32_t len = (uint16_t)c->r[EBX];
+    if (!len) len = 128u << ((c->r[ECX] >> 8) & 7);
+    bios_int1b_body(m);
+    if (!m->cfg.trace) return;
+    bool read = cmd == 0x02 || cmd == 0x06 || cmd == 0x0C;
+    cpu_dw_begin(buf, read ? len : 0, "");
+    char lab[40];
+    snprintf(lab, sizeof(lab), "INT1B AH=%02Xh の結果", ah0);
+    cpu_dw_taint8(4, (uint8_t)(c->r[EAX] >> 8), lab);   // AH
+    if (cmd == 0x0A) {   // READ ID: 読めた ID
+        cpu_dw_taint8(1, (uint8_t)c->r[ECX], "READ ID の C");
+        cpu_dw_taint8(5, (uint8_t)(c->r[ECX] >> 8), "READ ID の N");
+        cpu_dw_taint8(6, (uint8_t)(c->r[EDX] >> 8), "READ ID の H");
+        cpu_dw_taint8(2, (uint8_t)c->r[EDX], "READ ID の R");
+    }
+    if (read) plog("[fdchk] ↓ここから、読んだ %u バイト（[%05X]〜）と結果 AH を比べる命令を記録\n", len, buf & 0xFFFFF);
+}
+
+static void bios_int1b_body(Machine* m) {
     Cpu* c = &m->cpu;
     auto AH = [&]() { return (uint8_t)(c->r[EAX] >> 8); };
     uint8_t al = (uint8_t)c->r[EAX];
@@ -525,7 +640,7 @@ void bios_int1b(Machine* m) {
     uint8_t cmd = AH() & 0x0F;
     int unit = al & 3;
     if (unit == 0) poll_change();
-    FloppyImage* im = (unit == 0) ? s_img : nullptr;
+    FloppyImage* im = (unit == 0) ? s_img : (unit == 1) ? s_img2 : nullptr;
     if (m->cfg.trace) plog("[fd] INT1B AH=%02X AL=%02X C=%02X H=%02X R=%02X N=%02X BX=%04X\n",
                            AH(), al, (unsigned)(uint8_t)c->r[ECX], (unsigned)(uint8_t)(c->r[EDX] >> 8),
                            (unsigned)(uint8_t)c->r[EDX], (unsigned)(uint8_t)(c->r[ECX] >> 8), (unsigned)(c->r[EBX] & 0xFFFF));
@@ -543,7 +658,7 @@ void bios_int1b(Machine* m) {
     uint8_t H = (uint8_t)(c->r[EDX] >> 8), R = (uint8_t)c->r[EDX];
     uint16_t bx = (uint16_t)c->r[EBX];
     uint32_t buf = ((uint32_t)c->sr[ES_] << 4) + (uint16_t)c->r[EBP];
-    bool mt = (AH() & 0x80) != 0, seek = (AH() & 0x10) != 0;
+    bool mt = (AH() & 0x80) != 0, seek = (AH() & 0x10) != 0, mf = (AH() & 0x40) != 0;
     switch (cmd) {
     case 0x04:   // SENSE
         ret(im->wprot ? 0x10 : 0x00);   // bit4: 書き込み禁止
@@ -554,8 +669,14 @@ void bios_int1b(Machine* m) {
         if (seek) s_head_pos[unit] = C;
         FdTrack* t = im->track(s_head_pos[unit], H & 1);
         if (!t || t->secs.empty()) { ret(0xE0); return; }
-        FdSector& s = t->secs[t->rot % t->secs.size()];
-        t->rot = (t->rot + 1) % (int)t->secs.size();
+        FdSector* sp = nullptr;
+        for (size_t k = 0; k < t->secs.size(); k++) {   // 回転位置から、密度の合う ID を探す
+            FdSector& x = t->secs[t->rot % t->secs.size()];
+            t->rot = (t->rot + 1) % (int)t->secs.size();
+            if (density_ok(x, mf, t)) { sp = &x; break; }
+        }
+        if (!sp) { ret(0xE0); return; }
+        FdSector& s = *sp;
         c->r[ECX] = (c->r[ECX] & 0xFFFF0000u) | ((uint32_t)s.n << 8) | s.c;
         c->r[EDX] = (c->r[EDX] & 0xFFFF0000u) | ((uint32_t)s.h << 8) | s.r;
         ret(0x00); return; }
@@ -591,7 +712,7 @@ void bios_int1b(Machine* m) {
                 if (cmd == 0x02) {   // READ DIAGNOSTIC: ID を見ずにトラックの先頭から順に
                     if (!t->secs.empty()) s = &t->secs[(curR - R) % t->secs.size()];
                 } else {
-                    for (auto& x : t->secs) if (x.c == C && x.h == curH && x.r == curR && x.n == N) { s = &x; break; }
+                    for (auto& x : t->secs) if (x.c == C && x.h == curH && x.r == curR && x.n == N && density_ok(x, mf, t)) { s = &x; break; }
                 }
             }
             if (!s) {
