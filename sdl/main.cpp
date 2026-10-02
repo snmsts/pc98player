@@ -51,6 +51,7 @@ static int           g_mouse_speed = 100;
 static bool          g_turbo = false;
 static std::string   g_title;
 static bool          g_paused_by_focus = false;
+static bool          g_memedit_paused = false;     // メモリエディタの「操作中はゲームを止める」で止めている
 static bool          g_pause_inactive = false;
 static bool          g_middle_release = true;
 static bool          g_mouse_lock_disable = false;
@@ -62,6 +63,16 @@ static std::string U8(const fs::path& p) { auto s = p.u8string(); return std::st
 
 static void message(SDL_MessageBoxFlags kind, const std::string& text) {
     SDL_ShowSimpleMessageBox(kind, "PC98PLAYER", text.c_str(), g_win);
+}
+// はい／いいえ。default_yes=false なら Enter は「いいえ」
+static bool ask_yes_no(const std::string& title, const std::string& text, bool default_yes = true) {
+    const SDL_MessageBoxButtonData bt[2] = {
+        {default_yes ? (Uint32)SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT : 0u, 1, "はい"},
+        {(Uint32)SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT | (default_yes ? 0u : (Uint32)SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT), 0, "いいえ"},
+    };
+    SDL_MessageBoxData d = {SDL_MESSAGEBOX_INFORMATION | SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT, g_win, title.c_str(), text.c_str(), 2, bt, nullptr};
+    int id = 0;
+    return SDL_ShowMessageBox(&d, &id) && id == 1;
 }
 
 // ---- キー変換（SDL のスキャンコード = USB の物理位置 → PC-98）------------------------
@@ -242,6 +253,7 @@ static void update_title() {
     else if (g_captured) t += "  [マウス使用中: F12 で解放]";
     else t += "  [クリックでマウスを使う]";
     if (g_turbo) t += "  [早送り]";
+    if (g_memedit_paused) t += "  [一時停止中: メモリエディタ]";
     SDL_SetWindowTitle(g_win, t.c_str());
 }
 static void set_capture(bool on) {
@@ -270,17 +282,21 @@ static SlotInfo    g_slots[STATE_SLOTS];
 static std::string g_menu_note;
 static std::string g_toast;
 static Uint64      g_toast_until = 0;
-static const int MENU_COLS = 4, CELL_W = 150, CELL_H = 132, GRID_X = 20, GRID_Y = 62;
-static const int FD_Y = 328, FD_H = 22, FD_INS_X = 392, FD_INS_W = 128, FD_EJ_X = 526, FD_EJ_W = 94;
-enum { HIT_FD_INSERT = -2, HIT_FD_EJECT = -3 };
+static const int MENU_COLS = 4, CELL_W = 150, CELL_H = 132, GRID_X = 20, GRID_Y = 42;
+// 下の段: 1 行目 = フロッピーの名前（右端に前／次のディスク）、2 行目 = ボタン（左がフロッピー、右が「その他」）
+static const int FD_Y1 = 306, FD_Y = 330, FD_H = 20;
+static const int FD_INS_X = 20, FD_INS_W = 120, FD_EJ_X = 146, FD_EJ_W = 90, FD_UNIT_X = 242, FD_UNIT_W = 96;
+static const int OT_MEM_X = 360, OT_MEM_W = 136, OT_REBOOT_X = 502, OT_REBOOT_W = 118;
+static const int FD_PREV_X = 512, FD_PREV_W = 52, FD_NEXT_X = 568, FD_NEXT_W = 52;
+enum { HIT_FD_INSERT = -2, HIT_FD_EJECT = -3, HIT_FD_NEXT = -4, HIT_FD_PREV = -5, HIT_REBOOT = -6, HIT_MEMEDIT = -7, HIT_FD_UNIT = -8 };
 
 // フロッピーの小メニュー（win32 版のポップアップメニューの代わり）
 struct FdItem { std::string label; int id; bool enabled; std::string spec; };
 static std::vector<FdItem> g_fd_items;
 static int  g_fd_sel = -1;           // -1 = 閉じている
-static const int FDM_X = 300, FDM_W = 320, FDM_IH = 18;
-enum { FD_PICK = 1, FD_GW = 2, FD_REREAD = 3, FD_SAVE = 4, FD_DEV = 100 };
-enum { DLG_INSERT = 1, DLG_SAVE_D88 = 2 };
+static const int FDM_X = 20, FDM_W = 400, FDM_IH = 18;
+enum { FD_PICK = 1, FD_GW = 2, FD_REREAD = 3, FD_SAVE = 4, FD_FOLDER = 5, FD_DEV = 100, FD_LIST = 200 };
+enum { DLG_INSERT = 1, DLG_SAVE_D88 = 2, DLG_FOLDER = 3, DLG_FD_FOLDER = 4 };
 
 static void show_toast(const std::string& t) { g_toast = t; g_toast_until = SDL_GetTicks() + 2500; }
 
@@ -298,16 +314,43 @@ static void menu_open(int kind) {
 }
 static void menu_close() { g_menu = MENU_NONE; g_fd_sel = -1; }
 
-static std::string fd_name() {
-    FloppyImage* im = floppy::image();
-    if (!im) return "（空）";
-    std::string p = im->path;
-    size_t k = p.find_last_of("\\/");
-    return (k == std::string::npos ? p : p.substr(k + 1)) + "  [" + im->format + (im->wprot ? "・書込禁止" : "") + "]";
+// ---- 仮想フロッピー --------------------------------------------------------------
+static std::vector<std::string> g_disk_list;   // 「前／次のディスク」で順に入れ替える一覧
+static int g_disk_index = 0;
+// ブートモード（フロッピーから起動するゲーム）や FloppyDrive2= のときはドライブが 2 台。
+// F11 の画面の操作は g_fd_unit のドライブに対して行う
+static int g_fd_unit = 0;
+static bool fd_boot_mode() { return g_p && g_p->ps.cfg.boot_fd; }
+static bool fd_two() { return fd_boot_mode() || floppy::drive_letter_unit(1) != 0; }
+static int fd_unit() { return fd_two() ? g_fd_unit : 0; }
+static bool fd_folder_ok() { return !fd_boot_mode() && fd_unit() == 0; }   // フォルダを入れられるのは 1 台目（DOS）だけ
+static FloppyImage* fd_img() { return floppy::image_unit(fd_unit()); }
+static std::string fd_cur_path() { return floppy::current_path_unit(fd_unit()); }
+static std::string base_name(const std::string& p) { size_t k = p.find_last_of("\\/"); return k == std::string::npos ? p : p.substr(k + 1); }
+static std::string fd_label_unit(int u) {   // 「B:」または「ドライブ1」
+    if (fd_boot_mode()) return "ドライブ" + std::to_string(u + 1);
+    char l = floppy::drive_letter_unit(u);
+    return std::string(1, l ? l : '-') + ":";
 }
-static std::string drive_str() { char d = floppy::drive_letter(); return std::string(1, d ? d : '-'); }
+static std::string fd_label() { return fd_label_unit(fd_unit()); }
+static bool same_path(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) if (toupper((unsigned char)a[i]) != toupper((unsigned char)b[i])) return false;
+    return true;
+}
+// 今のドライブに入っているディスクが、一覧の何枚目か（無ければ -1）
+static int fd_list_index() {
+    std::string cur = fd_cur_path();
+    for (size_t i = 0; i < g_disk_list.size(); i++) if (same_path(g_disk_list[i], cur)) return (int)i;
+    return -1;
+}
+static std::string fd_name() {
+    FloppyImage* im = fd_img();
+    if (!im && fd_folder_ok() && !floppy::folder().empty()) return "[" + base_name(floppy::folder()) + "]  [フォルダ]";
+    if (!im) return "（空）";
+    return base_name(im->path) + "  [" + im->format + (im->wprot ? "・書込禁止" : "") + "]";
+}
 
-enum { DLG_FOLDER = 3 };
 static void SDLCALL dialog_done(void* user, const char* const* list, int) {
     int code = (int)(intptr_t)user;
     bool picked = list && list[0];
@@ -327,11 +370,17 @@ static const SDL_DialogFileFilter k_d88_filter[] = { {"D88 イメージ", "d88"}
 
 static void fd_insert(const std::string& spec) {
     std::string err;
-    if (floppy::insert(spec, &err)) {
-        show_toast(std::string(floppy::is_device_spec(spec) ? "実機のドライブをつなぎました: " : "") + drive_str() + ": にフロッピーを入れました");
+    if (floppy::insert_unit(fd_unit(), spec, &err)) {
+        show_toast(fd_label() + (floppy::is_device_spec(spec) ? " に実機のドライブをつなぎました（" + spec + "）" : " にフロッピーを入れました"));
         menu_close();
     } else if (g_menu != MENU_NONE) g_menu_note = "入れられませんでした: " + err;
     else show_toast("入れられませんでした: " + err);
+}
+static void fd_insert_folder(const std::string& dir) {
+    if (!fd_folder_ok()) { g_menu_note = "フォルダを入れられるのは 1 台目のドライブ（MS-DOS のゲーム）だけです"; return; }
+    std::string err;
+    if (floppy::insert(dir, &err)) { show_toast(fd_label() + " にフォルダを入れました"); menu_close(); }
+    else g_menu_note = "入れられませんでした: " + err;
 }
 static bool is_floppy_image(const std::string& path) {
     size_t d = path.rfind('.');
@@ -342,15 +391,32 @@ static bool is_floppy_image(const std::string& path) {
     return list.find(";" + ext + ";") != std::string::npos;
 }
 static void fd_save_d88(const std::string& path) {
-    FloppyImage* im = floppy::image();
+    FloppyImage* im = fd_img();
     if (!im) { g_menu_note = "フロッピーは入っていません"; return; }
     std::string err;
     if (im->save_d88(path, &err)) { show_toast("D88 で保存しました"); menu_close(); }
     else g_menu_note = "保存できませんでした: " + err;
 }
+static void fd_insert_listed(int k) {
+    if (k < 0 || k >= (int)g_disk_list.size()) return;
+    std::string err;
+    if (floppy::insert_unit(fd_unit(), g_disk_list[k], &err)) {
+        g_disk_index = k;
+        char buf[64]; snprintf(buf, sizeof(buf), "（%d/%d）", k + 1, (int)g_disk_list.size());
+        show_toast(fd_label() + " ← " + base_name(g_disk_list[k]) + buf);
+        menu_close();
+    } else g_menu_note = "入れられませんでした: " + err;
+}
+static int fd_base_index() { int i = fd_list_index(); return i >= 0 ? i : g_disk_index; }
+static void fd_next_disk() { if (g_disk_list.size() > 1) fd_insert_listed((fd_base_index() + 1) % (int)g_disk_list.size()); }
+static void fd_prev_disk() { if (g_disk_list.size() > 1) fd_insert_listed((fd_base_index() + (int)g_disk_list.size() - 1) % (int)g_disk_list.size()); }
 static void fd_menu_open() {
     g_fd_items.clear();
     g_fd_items.push_back({"イメージファイルを選ぶ…", FD_PICK, true, ""});
+    if (fd_folder_ok()) g_fd_items.push_back({"フォルダを入れる（キーディスク向け）…", FD_FOLDER, true, ""});
+    int cur = fd_list_index();
+    for (size_t i = 0; i < g_disk_list.size() && i < 8; i++)
+        g_fd_items.push_back({std::string((int)i == cur ? "＊" : "　") + std::to_string(i + 1) + " 枚目: " + base_name(g_disk_list[i]), FD_LIST + (int)i, true, ""});
     std::vector<fdreal::Device> devs = fdreal::list_devices();
     bool has_gw = false;
     for (size_t i = 0; i < devs.size() && i < 8; i++) {
@@ -358,7 +424,7 @@ static void fd_menu_open() {
         if (devs[i].spec.compare(0, 3, "GW:") == 0) has_gw = true;
     }
     if (!has_gw) g_fd_items.push_back({"Greaseweazle を探してつなぐ", FD_GW, true, "GW"});
-    FloppyImage* im = floppy::image();
+    FloppyImage* im = fd_img();
     g_fd_items.push_back({"読み直す（実機のディスクを入れ替えた）", FD_REREAD, im && im->src, ""});
     g_fd_items.push_back({"今のディスクを D88 で保存…", FD_SAVE, im != nullptr, ""});
     g_fd_sel = 0;
@@ -368,9 +434,13 @@ static void fd_menu_decide(int i) {
     FdItem it = g_fd_items[i];
     g_fd_sel = -1;
     std::string root = g_p->ps.cfg.root;
+    if (it.id >= FD_LIST) { fd_insert_listed(it.id - FD_LIST); return; }
     switch (it.id) {
     case FD_PICK:
         SDL_ShowOpenFileDialog(dialog_done, (void*)(intptr_t)DLG_INSERT, g_win, k_fd_filters, 2, root.c_str(), false);
+        break;
+    case FD_FOLDER:
+        SDL_ShowOpenFolderDialog(dialog_done, (void*)(intptr_t)DLG_FD_FOLDER, g_win, root.c_str(), false);
         break;
     case FD_SAVE: {
         std::string def = hostfs::join(root, "DISK.D88");
@@ -386,10 +456,16 @@ static void fd_menu_decide(int i) {
     }
 }
 static void fd_eject() {
-    if (!floppy::image()) { g_menu_note = "フロッピーは入っていません"; return; }
-    floppy::eject();
-    show_toast(drive_str() + ": のフロッピーを取り出しました");
+    if (!fd_img() && (!fd_folder_ok() || floppy::folder().empty())) { g_menu_note = "フロッピーは入っていません"; return; }
+    floppy::eject_unit(fd_unit());
+    show_toast(fd_label() + " のフロッピーを取り出しました");
     menu_close();
+}
+// 操作するドライブを 1 ⇔ 2 で切り替える
+static void fd_toggle_unit() {
+    if (!fd_two()) return;
+    g_fd_unit ^= 1;
+    g_menu_note.clear();
 }
 
 static void menu_decide() {
@@ -407,6 +483,34 @@ static void menu_decide() {
     }
 }
 
+#include "memedit.inc"
+#include "gamepad.inc"
+
+// 「その他」: プログラム再起動（PC-98 の電源を入れ直す。INI も読み直す）
+static bool reload_settings(PlayerSettings* out, std::string* err);
+static void apply_live_settings(const PlayerSettings& old_ps);
+static void menu_reboot() {
+    if (!g_p) return;
+    if (!ask_yes_no("プログラム再起動", "PC-98 を起動し直して、最初からやり直しますか？\n\n"
+                    "ゲームでセーブしていない進行は失われます（ステートセーブは残ります）。", false)) return;
+    audio_flush();
+    g_turbo = false;
+    std::string err, rerr;
+    PlayerSettings old_ps = g_p->ps, nps;
+    pad::release_all(g_p->m);
+    bool reloaded = reload_settings(&nps, &rerr);   // INI を読み直す（読めなければ今の設定のまま）
+    bool ok = reloaded ? g_p->reboot(nps, &err) : g_p->reboot(&err);
+    pad::forget();
+    if (!ok) { g_menu_note = "起動し直せませんでした: " + err; return; }
+    if (reloaded) apply_live_settings(old_ps);
+    memedit::on_reboot();
+    menu_close();
+    if (!g_p->floppy_error.empty()) show_toast(g_p->floppy_error);
+    else if (!rerr.empty()) show_toast(rerr);
+    else show_toast(reloaded ? "INI を読み直して、プログラムを起動し直しました" : "プログラムを起動し直しました");
+    update_title();
+}
+
 // 640x400 の座標 → スロット番号（無ければ -1）
 static int menu_hit(float lx, float ly) {
     for (int i = 0; i < STATE_SLOTS; i++) {
@@ -416,6 +520,13 @@ static int menu_hit(float lx, float ly) {
     if (ly >= FD_Y && ly < FD_Y + FD_H) {
         if (lx >= FD_INS_X && lx < FD_INS_X + FD_INS_W) return HIT_FD_INSERT;
         if (lx >= FD_EJ_X && lx < FD_EJ_X + FD_EJ_W) return HIT_FD_EJECT;
+        if (fd_two() && lx >= FD_UNIT_X && lx < FD_UNIT_X + FD_UNIT_W) return HIT_FD_UNIT;
+        if (lx >= OT_MEM_X && lx < OT_MEM_X + OT_MEM_W) return HIT_MEMEDIT;
+        if (lx >= OT_REBOOT_X && lx < OT_REBOOT_X + OT_REBOOT_W) return HIT_REBOOT;
+    }
+    if (g_disk_list.size() > 1 && ly >= FD_Y1 && ly < FD_Y1 + FD_H) {
+        if (lx >= FD_PREV_X && lx < FD_PREV_X + FD_PREV_W) return HIT_FD_PREV;
+        if (lx >= FD_NEXT_X && lx < FD_NEXT_X + FD_NEXT_W) return HIT_FD_NEXT;
     }
     return -1;
 }
@@ -426,11 +537,22 @@ static int fd_menu_hit(float lx, float ly) {
     int i = (int)(ly - top) / FDM_IH;
     return i < (int)g_fd_items.size() ? i : -1;
 }
+// 幅 w に収まるように後ろを省く
+static std::string ov_fit(const std::string& utf8, int w) {
+    if (ov_text_width(utf8) <= w) return utf8;
+    std::string s = utf8;
+    while (!s.empty() && ov_text_width(s + "…") > w) {
+        size_t k = s.size() - 1;
+        while (k > 0 && ((unsigned char)s[k] & 0xC0) == 0x80) k--;
+        s.resize(k);
+    }
+    return s + "…";
+}
 
 static void draw_menu() {
     bool save = g_menu == MENU_SAVE;
     ov_fill(0, 0, 640, 400, RGBA(0, 0, 0, 185));
-    ov_text(0, 18, save ? RGBA(255, 210, 120) : RGBA(140, 210, 255),
+    ov_text(0, 14, save ? RGBA(255, 210, 120) : RGBA(140, 210, 255),
             save ? "ステートセーブ ― 保存するスロットを選んでください" : "ステートロード ― 読み込むスロットを選んでください", 640);
     for (int i = 0; i < STATE_SLOTS; i++) {
         int cx = GRID_X + (i % MENU_COLS) * CELL_W, cy = GRID_Y + (i / MENU_COLS) * CELL_H;
@@ -455,14 +577,31 @@ static void draw_menu() {
         ov_text(cx + 7, cy + 90, sel ? RGBA(255, 255, 255) : RGBA(200, 200, 210), lab);
         if (si.used) ov_text(cx + 7, cy + 106, sel ? RGBA(230, 230, 230) : RGBA(150, 150, 165), si.when);
     }
-    // フロッピーの欄
-    ov_text(GRID_X, FD_Y + 3, RGBA(255, 230, 150), "FD " + drive_str() + ":");
-    ov_text(GRID_X + 56, FD_Y + 3, floppy::image() ? RGBA(235, 235, 245) : RGBA(130, 130, 145), fd_name());
-    ov_fill(FD_INS_X, FD_Y, FD_INS_W, FD_H, RGBA(60, 70, 100));
-    ov_text(FD_INS_X, FD_Y + 3, RGBA(255, 255, 255), "F:入れる/実機", FD_INS_W);
-    ov_fill(FD_EJ_X, FD_Y, FD_EJ_W, FD_H, RGBA(60, 70, 100));
-    ov_text(FD_EJ_X, FD_Y + 3, RGBA(255, 255, 255), "E:取り出す", FD_EJ_W);
-    if (!g_menu_note.empty()) ov_text(0, 356, RGBA(255, 120, 120), g_menu_note, 640);
+    // フロッピーの欄: 1 行目 = 今のドライブとディスク（2 台あるときはもう一方も）、右端に前／次
+    {
+        bool pn = g_disk_list.size() > 1;
+        std::string head = (fd_two() ? fd_label() : "FD " + fd_label()) + " ";
+        ov_text(GRID_X, FD_Y1 + 2, RGBA(255, 230, 150), head);
+        int nx = GRID_X + ov_text_width(head) + 4;
+        std::string nm = fd_name();
+        if (fd_two()) {
+            std::string o = floppy::current_path_unit(g_fd_unit ^ 1);
+            nm += "　／ " + fd_label_unit(g_fd_unit ^ 1) + " " + (o.empty() ? "（空）" : base_name(o));
+        }
+        if (pn && fd_list_index() >= 0) nm += "　" + std::to_string(fd_list_index() + 1) + "/" + std::to_string(g_disk_list.size()) + " 枚目";
+        ov_text(nx, FD_Y1 + 2, !fd_cur_path().empty() ? RGBA(235, 235, 245) : RGBA(130, 130, 145), ov_fit(nm, (pn ? FD_PREV_X - 8 : 620) - nx));
+        auto button = [&](int x, int y, int w, const char* t) {
+            ov_fill(x, y, w, FD_H, RGBA(60, 70, 100));
+            ov_text(x, y + 2, RGBA(255, 255, 255), t, w);
+        };
+        if (pn) { button(FD_PREV_X, FD_Y1, FD_PREV_W, "P:前"); button(FD_NEXT_X, FD_Y1, FD_NEXT_W, "N:次"); }
+        button(FD_INS_X, FD_Y, FD_INS_W, "F:入れる/実機");
+        button(FD_EJ_X, FD_Y, FD_EJ_W, "E:取り出す");
+        if (fd_two()) button(FD_UNIT_X, FD_Y, FD_UNIT_W, "D:ドライブ");
+        button(OT_MEM_X, FD_Y, OT_MEM_W, "M:メモリエディタ");
+        button(OT_REBOOT_X, FD_Y, OT_REBOOT_W, "R:再起動");
+    }
+    if (!g_menu_note.empty()) ov_text(0, 356, RGBA(255, 120, 120), ov_fit(g_menu_note, 636), 640);
     ov_text(0, 380, RGBA(170, 170, 185), "カーソル/マウス:選ぶ  Enter/左クリック:決定  Esc/右クリック:やめる", 640);
     // フロッピーの小メニュー
     if (g_fd_sel >= 0) {
@@ -473,7 +612,7 @@ static void draw_menu() {
         for (size_t i = 0; i < g_fd_items.size(); i++) {
             int y = top + 2 + (int)i * FDM_IH;
             if ((int)i == g_fd_sel) ov_fill(FDM_X + 2, y, FDM_W - 4, FDM_IH, RGBA(60, 90, 150));
-            ov_text(FDM_X + 8, y + 1, g_fd_items[i].enabled ? RGBA(240, 240, 250) : RGBA(110, 110, 125), g_fd_items[i].label);
+            ov_text(FDM_X + 8, y + 1, g_fd_items[i].enabled ? RGBA(240, 240, 250) : RGBA(110, 110, 125), ov_fit(g_fd_items[i].label, FDM_W - 16));
         }
     }
 }
@@ -520,22 +659,30 @@ static void on_menu_key(SDL_Scancode sc, bool first) {
     case SDL_SCANCODE_ESCAPE: case SDL_SCANCODE_F11: if (first) menu_close(); return;
     case SDL_SCANCODE_F: if (first) fd_menu_open(); return;
     case SDL_SCANCODE_E: if (first) fd_eject(); return;
+    case SDL_SCANCODE_N: if (first) fd_next_disk(); return;
+    case SDL_SCANCODE_P: if (first) fd_prev_disk(); return;
+    case SDL_SCANCODE_D: if (first) fd_toggle_unit(); return;
+    case SDL_SCANCODE_R: if (first) menu_reboot(); return;
+    case SDL_SCANCODE_M: if (first) { menu_close(); memedit::show(); } return;
     default: return;
     }
     g_menu_note.clear();
 }
 
 static void on_event(SDL_Event& e, bool& running) {
+    if (memedit::owns(e)) { memedit::on_event(e); return; }   // メモリエディタの窓あての入力
     if (e.type == g_ev_dialog) {
         std::string* path = (std::string*)e.user.data1;
         if (!path) return;
         if (e.user.code == DLG_INSERT) fd_insert(*path);
         else if (e.user.code == DLG_SAVE_D88) fd_save_d88(*path);
+        else if (e.user.code == DLG_FD_FOLDER) fd_insert_folder(*path);
         delete path;
         return;
     }
     switch (e.type) {
     case SDL_EVENT_QUIT: running = false; break;
+    case SDL_EVENT_WINDOW_CLOSE_REQUESTED: running = false; break;   // 窓が 2 つあると、本体の窓を閉じても QUIT は来ない
     case SDL_EVENT_DROP_FILE:   // 動いている最中に落とされたフロッピーイメージは入れる
         if (e.drop.data && is_floppy_image(e.drop.data)) fd_insert(e.drop.data);
         else if (e.drop.data) show_toast("フロッピーイメージではありません");
@@ -588,6 +735,11 @@ static void on_event(SDL_Event& e, bool& running) {
             if (h >= 0) { g_sel = h; menu_decide(); }
             else if (h == HIT_FD_INSERT) fd_menu_open();
             else if (h == HIT_FD_EJECT) fd_eject();
+            else if (h == HIT_FD_NEXT) fd_next_disk();
+            else if (h == HIT_FD_PREV) fd_prev_disk();
+            else if (h == HIT_FD_UNIT) fd_toggle_unit();
+            else if (h == HIT_REBOOT) menu_reboot();
+            else if (h == HIT_MEMEDIT) { menu_close(); memedit::show(); }
             break;
         }
         if (e.button.button == SDL_BUTTON_MIDDLE) { if (down && g_middle_release) set_capture(false); break; }
@@ -601,10 +753,41 @@ static void on_event(SDL_Event& e, bool& running) {
 // ---- 起動時の設定 ---------------------------------------------------------------
 static std::string upper(std::string s) { for (auto& c : s) c = (char)toupper((unsigned char)c); return s; }
 
-// INI が無いとき: 起動候補を探す（*.BAT を優先、次に *.EXE / *.COM）
-static std::string guess_start(const std::string& dir) {
-    std::vector<std::string> bats, exes;
+// dir の中の name（大文字小文字は区別しない）。無ければ空
+static fs::path find_ci(const std::string& dir, const std::string& name) {
     std::error_code ec;
+    std::string un = upper(name);
+    for (auto& de : fs::directory_iterator(P(dir), ec))
+        if (de.is_regular_file(ec) && upper(U8(de.path().filename())) == un) return de.path();
+    return fs::path();
+}
+// INI が無いとき: 起動候補を探す
+//  1) CONFIG.SYS の SHELL= がゲームの起動用プログラムならそれ（実機ではこれが最初に動く）
+//  2) AUTOEXEC.BAT
+//  3) *.BAT、次に *.EXE / *.COM
+static std::string guess_start(const std::string& dir) {
+    std::error_code ec;
+    {
+        std::ifstream f(find_ci(dir, "CONFIG.SYS"), std::ios::binary);
+        std::string t((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (t.size() > 4096) t.resize(4096);
+        t = upper(t);
+        size_t p = t.find("SHELL");
+        while (p != std::string::npos && p > 0 && t[p - 1] != '\n' && t[p - 1] != '\r' && t[p - 1] != ' ') p = t.find("SHELL", p + 1);
+        size_t e = p == std::string::npos ? p : t.find('=', p);
+        if (e != std::string::npos) {
+            size_t s0 = e + 1;
+            while (s0 < t.size() && (t[s0] == ' ' || t[s0] == '\t')) s0++;
+            size_t s1 = s0;
+            while (s1 < t.size() && t[s1] != ' ' && t[s1] != '\t' && t[s1] != '\r' && t[s1] != '\n') s1++;
+            std::string prog = t.substr(s0, s1 - s0);
+            size_t sl = prog.find_last_of("\\:");
+            if (sl != std::string::npos) prog = prog.substr(sl + 1);
+            if (!prog.empty() && prog != "COMMAND.COM" && !find_ci(dir, prog).empty()) return prog;
+        }
+    }
+    if (!find_ci(dir, "AUTOEXEC.BAT").empty()) return "AUTOEXEC.BAT";
+    std::vector<std::string> bats, exes;
     for (auto& de : fs::directory_iterator(P(dir), ec)) {
         if (!de.is_regular_file(ec)) continue;
         std::string n = upper(U8(de.path().filename()));
@@ -637,7 +820,8 @@ static void write_template_ini(const std::string& path, const std::string& start
       << "; MIDI（MPU-PC98II, E0D0h）を載せる。SDL 版では今は Windows だけ音が出る" << nl << "MIDI=0" << nl << "MidiDevice=-1" << nl
       << "MidiSpeedFix=100" << nl
       << "; 起動時に入れるフロッピーイメージ（D88 / FDI / NFD / ベタ / SCP / HFE）と、そのドライブ名。F11 の画面でも入れ替えられる" << nl
-      << "FloppyImage=" << nl << "FloppyDrive=B" << nl
+      << "; （FloppyDisk= は FloppyImage= と同じ。どちらで書いてもよい）" << nl
+      << "FloppyDisk=" << nl << "FloppyDrive=B" << nl
       << "GWDrive=A" << nl << "GWRevs=3" << nl
       << "; 起動時のカレントドライブ（空なら Start= のドライブ）と、ゲームのドライブの空き容量として見せる大きさ（MB）" << nl
       << "CurrentDrive=" << nl << "FreeSpaceMB=96" << nl
@@ -654,7 +838,13 @@ static void write_template_ini(const std::string& path, const std::string& start
       << "; ゲームが終わったら窓を閉じる" << nl << "ExitOnEnd=1" << nl
       << "; 非アクティブ時に一時停止" << nl << "PauseInactive=0" << nl
       << "; マウスの中ボタン（ホイール）クリックでマウスを放す（0 で無効。F12 は常に有効）" << nl << "MiddleRelease=1" << nl
-      << "; 1 にするとマウスを一切捕まえない（マウスを使わないソフト向け）" << nl << "MouseLockDisable=0" << nl;
+      << "; 1 にするとマウスを一切捕まえない（マウスを使わないソフト向け）" << nl << "MouseLockDisable=0" << nl
+      << "; ゲームパッド: 音源ボードのジョイスティック端子（ATARI 仕様: 上下左右＋トリガ A・B）にあてる。0 で使わない" << nl << "Joystick=1" << nl
+      << "; 方向の行き先: JOY（ジョイスティック）/ CURSOR（カーソルキー）/ TENKEY（テンキー）。JOY+CURSOR のように重ねられる" << nl
+      << "JoyDirection=JOY" << nl
+      << "; ボタンの割り当て: A / B（トリガ）, RAPIDA / RAPIDB（連射）, キー名（RETURN SPACE ESC KEYA F1 NUM5 など）, NONE" << nl
+      << "; A+RETURN のように重ねられる。変えたら F11 → R（プログラム再起動）で読み直して試せる" << nl
+      << "JoyButton1=A" << nl << "JoyButton2=B" << nl << "JoyButton3=SPACE" << nl << "JoyButton4=RETURN" << nl;
     std::ofstream o(P(path), std::ios::binary);
     o << t.str();
 }
@@ -714,15 +904,6 @@ static void take_path(const fs::path& a, fs::path* dir, fs::path* ini) {
     else if (upper(U8(a.extension())) == ".INI") { *ini = a; *dir = a.parent_path(); }
     else { *dir = a.parent_path(); *ini = *dir / "PC98PLAYER.INI"; }
 }
-static bool ask_yes_no(const std::string& title, const std::string& text) {
-    const SDL_MessageBoxButtonData bt[2] = {
-        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "はい"},
-        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "いいえ"},
-    };
-    SDL_MessageBoxData d = {SDL_MESSAGEBOX_INFORMATION, g_win, title.c_str(), text.c_str(), 2, bt, nullptr};
-    int id = 0;
-    return SDL_ShowMessageBox(&d, &id) && id == 1;
-}
 // ハードディスクイメージの中身を、イメージの横の同じ名前のフォルダへ展開して、そこをゲームのフォルダにする
 //  戻り値: 1 = 展開した（*dir に展開先）, 0 = やめた, -1 = 失敗
 static int extract_hd_image(const fs::path& image, fs::path* dir) {
@@ -760,6 +941,68 @@ static int extract_hd_image(const fs::path& image, fs::path* dir) {
     *dir = dest;
     return 1;
 }
+// ---- ブートモード（DOS 以前の、IPL から起動するフロッピー） ---------------------------
+//  渡されたフロッピーイメージに MS-DOS のファイル表が 1 枚も無く、起動用のセクタ（IPL）を持つものが
+//  あれば、「フロッピーから起動する」モードで動かす（win32 版と同じ判断）。
+struct BootPlan { bool on = false; std::string disk1, disk2; };
+static BootPlan g_boot_override;   // 既にある INI（Boot= の無いもの）を使うときに、上から当てる
+static bool plan_boot(const std::vector<std::string>& imgs, BootPlan* bp) {
+    int boot = -1;
+    for (size_t i = 0; i < imgs.size(); i++) {
+        bool dos = false, bt = false;
+        if (!floppy::probe_image(imgs[i], &dos, &bt)) return false;
+        if (dos) return false;
+        if (bt && boot < 0) boot = (int)i;
+    }
+    if (boot < 0) return false;
+    bp->on = true;
+    bp->disk1 = imgs[boot];
+    bp->disk2.clear();
+    for (size_t i = 0; i < imgs.size(); i++) if ((int)i != boot) { bp->disk2 = imgs[i]; break; }
+    return true;
+}
+// INI に書く名前（INI と同じフォルダならファイル名だけ）
+static std::string rel_to(const fs::path& dir, const std::string& p) {
+    fs::path pp = P(p);
+    return pp.parent_path() == dir ? U8(pp.filename()) : p;
+}
+static void write_boot_ini(const fs::path& path, const fs::path& dir, const BootPlan& bp) {
+    const char* nl = "\r\n";
+    std::ostringstream t;
+    t << "; PC98PLAYER.INI  -- フロッピーから直接起動するゲーム（MS-DOS を使わない独自形式のディスク）" << nl
+      << "[PC98PLAYER]" << nl
+      << "; FD = MS-DOS を使わず、1 台目のドライブのフロッピーの IPL から起動する" << nl << "Boot=FD" << nl
+      << "; 1 台目・2 台目のドライブに入れるディスク。ゲーム中の入れ替えは F11 の画面で（D キーでドライブを切り替え）" << nl
+      << "FloppyDisk=" << rel_to(dir, bp.disk1) << nl
+      << "FloppyDisk2=" << (bp.disk2.empty() ? "" : rel_to(dir, bp.disk2)) << nl
+      << "; ウインドウの表示倍率（1 で 640x400）" << nl << "Scale=2" << nl
+      << "; 仮想 CPU の速さ（MHz 相当）。昔のソフトは 8 や 10 くらいが当時の速さ" << nl << "CpuMHz=10" << nl
+      << "; 音源ボード（86 / 26 / 0=なし）" << nl << "SoundBoard=26" << nl
+      << "; ウインドウのタイトル（空ならフォルダ名）" << nl << "Title=" << nl
+      << "; 1 にすると、入れるフロッピーを必ず書き込み禁止にする（ゲームのセーブもできなくなる）" << nl << "FloppyWriteProtect=0" << nl;
+    std::error_code ec;
+    if (fs::exists(path, ec)) return;
+    std::ofstream o(path, std::ios::binary);
+    o << t.str();
+}
+// フロッピーイメージ（1 枚以上）を渡されたとき。ブートモードで動かすなら true（*dir, *ini を決める）
+static bool take_boot_images(const std::vector<std::string>& imgs0, fs::path* dir, fs::path* ini) {
+    std::vector<std::string> imgs = imgs0;
+    std::sort(imgs.begin(), imgs.end(), [](const std::string& x, const std::string& y) { return upper(x) < upper(y); });
+    BootPlan bp;
+    if (!plan_boot(imgs, &bp)) return false;
+    std::error_code ec;
+    *dir = P(bp.disk1).parent_path();
+    *ini = *dir / "PC98PLAYER.INI";
+    write_boot_ini(*ini, *dir, bp);
+    if (!fs::exists(*ini, ec)) g_boot_override = bp;   // 書けない場所: INI 無しで動かす
+    else {
+        Ini chk; load_ini_any(U8(*ini), chk);
+        std::string b = upper(chk.get("PC98PLAYER.BOOT", ""));
+        if (!(b == "FD" || b == "FLOPPY" || b == "1")) g_boot_override = bp;   // ほかの用途の INI: 中身はそのまま、起動の仕方だけ当てる
+    }
+    return true;
+}
 // 引数やドロップで来たもの: ハードディスクイメージなら展開してから。false = 起動しない
 static bool take_arg(const fs::path& a, fs::path* dir, fs::path* ini) {
     std::error_code ec;
@@ -769,6 +1012,8 @@ static bool take_arg(const fs::path& a, fs::path* dir, fs::path* ini) {
         take_path(d, dir, ini);
         return true;
     }
+    // ブートモードで動くフロッピーイメージ。そうでないもの（MS-DOS のディスク）は従来どおり、それがあるフォルダ
+    if (fs::is_regular_file(a, ec) && is_floppy_image(U8(a)) && take_boot_images({U8(a)}, dir, ini)) return true;
     take_path(a, dir, ini);
     return true;
 }
@@ -826,7 +1071,16 @@ static bool pick_folder(fs::path* out) {
 // 順に: 引数 → .app に落とされたもの → カレントフォルダ → アプリの隣 → 選ぶ画面
 static bool find_game(int argc, char** argv, fs::path* dir, fs::path* ini) {
     std::error_code ec;
-    if (argc >= 2 && argv[1][0] != '-') return take_arg(norm(P(argv[1])), dir, ini);
+    if (argc >= 2 && argv[1][0] != '-') {
+        // フロッピーイメージを何枚か渡されたら、まとめてブートモードにできるか調べる
+        std::vector<std::string> imgs;
+        for (int i = 1; i < argc; i++) {
+            fs::path a = norm(P(argv[i]));
+            if (argv[i][0] != '-' && fs::is_regular_file(a, ec) && is_floppy_image(U8(a))) imgs.push_back(U8(a));
+        }
+        if (imgs.size() > 1 && is_floppy_image(argv[1]) && take_boot_images(imgs, dir, ini)) return true;
+        return take_arg(norm(P(argv[1])), dir, ini);
+    }
 #ifdef __APPLE__
     // Finder で .app にフォルダを落として起動すると、起動直後にドロップとして届く
     for (Uint64 until = SDL_GetTicks() + 300; SDL_GetTicks() < until;) {
@@ -854,12 +1108,115 @@ static bool find_game(int argc, char** argv, fs::path* dir, fs::path* ini) {
     return true;
 }
 
+// ---- INI → 設定（起動時とプログラム再起動のとき） ------------------------------------
+static fs::path    g_ini_path;       // 読んだ INI（無い = 読み直さない）
+static fs::path    g_base_dir;       // Root= を当てる前のゲームのフォルダ
+static std::string g_ini_floppy;     // INI の FloppyDisk= / FloppyImage=（読み直しで変わったときだけ入れ替える）
+static std::string g_ini_floppy2;    // 同じく FloppyDisk2=
+static bool        g_ini_memedit = false;   // MemoryEditor=1
+
+static void apply_boot_override(PlayerSettings* ps) {
+    if (!g_boot_override.on) return;
+    ps->cfg.boot_fd = true;
+    ps->cfg.floppy_image = g_boot_override.disk1;
+    ps->cfg.floppy_image2 = g_boot_override.disk2;
+}
+// Root= を当ててゲームのフォルダを決め、PlayerSettings を作る（Start= が空なら推測）
+static void resolve_settings(const Ini& ini, PlayerSettings* ps, fs::path* game_dir) {
+    std::error_code ec;
+    fs::path dir = g_base_dir;
+    std::string rt = ini.get("PC98PLAYER.ROOT", "");   // Root=: ゲームのフォルダを INI とは別の場所にする（INI からの相対パス可）
+    if (!rt.empty()) {
+        fs::path r = P(rt);
+        fs::path cand = norm(r.is_absolute() ? r : g_ini_path.parent_path() / r);
+        if (fs::is_directory(cand, ec)) dir = cand;
+        else message(SDL_MESSAGEBOX_WARNING, "Root= のフォルダが見つかりません:\n" + U8(cand) + "\n\nINI のあるフォルダで起動します。");
+    }
+    player_settings_from_ini(ini, U8(dir), ps);
+    apply_boot_override(ps);
+    if (ps->cfg.start.empty() && !ps->cfg.boot_fd) ps->cfg.start = guess_start(U8(dir));
+    *game_dir = dir;
+}
+// ホスト側（マウス・音・ゲームパッド）の設定。読めなかったゲームパッドの割り当てを返す
+static std::string apply_host_settings(const Ini& ini) {
+    g_mouse_speed = ini.geti("PC98PLAYER.MOUSESPEED", 100);
+    g_pause_inactive = ini.geti("PC98PLAYER.PAUSEINACTIVE", 0) != 0;
+    g_middle_release = ini.geti("PC98PLAYER.MIDDLERELEASE", 1) != 0;
+    g_mouse_lock_disable = ini.geti("PC98PLAYER.MOUSELOCKDISABLE", 0) != 0;
+    if (g_mouse_lock_disable && g_captured) set_capture(false);
+    g_audio_frames = std::max(1, std::min(30, ini.geti("PC98PLAYER.AUDIOFRAMES", 4)));
+    g_ini_memedit = ini.geti("PC98PLAYER.MEMORYEDITOR", 0) != 0;
+    pad::s_notice = show_toast;
+    std::string bad;
+    pad::configure(ini, g_p ? g_p->m : nullptr, &bad);
+    while (!bad.empty() && bad.back() == '\n') bad.pop_back();
+    for (auto& c : bad) if (c == '\n') c = ' ';
+    return bad;
+}
+static bool reload_settings(PlayerSettings* out, std::string* err) {
+    if (g_ini_path.empty()) return false;
+    Ini ini;
+    if (!load_ini_any(U8(g_ini_path), ini)) { *err = "INI を読めなかったので、今の設定のまま起動し直しました"; return false; }
+    PlayerSettings ps;
+    fs::path dir;
+    resolve_settings(ini, &ps, &dir);
+    if (ps.cfg.start.empty() && !ps.cfg.boot_fd) { *err = "INI の Start= が空なので、今の設定のまま起動し直しました"; return false; }
+    // フロッピー: INI の FloppyDisk= が変わっていなければ、今入っているディスクのまま
+    if (ps.cfg.floppy_image == g_ini_floppy) ps.cfg.floppy_image = floppy::current_path();
+    else g_ini_floppy = ps.cfg.floppy_image;
+    if (ps.cfg.floppy_image2 == g_ini_floppy2) ps.cfg.floppy_image2 = floppy::current_path_unit(1);
+    else g_ini_floppy2 = ps.cfg.floppy_image2;
+    if (ps.cfg.trace && !getenv("PC98PLAYER_LOG")) set_log_env(hostfs::join(ps.cfg.root, "PC98PLAYER.LOG"));
+    std::string bad = apply_host_settings(ini);
+    if (!bad.empty()) *err = "INI のゲームパッドの割り当てが読めません: " + bad;
+    *out = ps;
+    return true;
+}
+static void set_title_from(const PlayerSettings& ps) {
+    g_title = (ps.title.empty() ? base_name(ps.cfg.root) : ps.title) + " - PC98PLAYER";
+}
+// 起動し直したあと、窓や音の出口など、本体の外の設定を新しい INI に合わせる
+static void apply_live_settings(const PlayerSettings& o) {
+    const PlayerSettings& n = g_p->ps;
+    set_title_from(n);
+    if (n.sample_rate != o.sample_rate) { if (g_audio) SDL_DestroyAudioStream(g_audio); g_audio = nullptr; audio_open(n.sample_rate); }
+    if (n.cfg.midi != o.cfg.midi || n.midi_device != o.midi_device) {
+        midi_close();
+        g_p->midi_sink = nullptr;
+        if (n.cfg.midi && !midi_open(n.midi_device)) show_toast("MIDI の出力を開けませんでした");
+    }
+    if (n.font_name != o.font_name) {
+        std::string ferr;
+        if (!hostfont_open(n.font_name, &ferr)) show_toast(ferr);
+        hostfont_install();
+    }
+    bool full = (SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN) != 0;
+    if (n.fullscreen != full) toggle_fullscreen();
+    else if (n.scale != o.scale && !full) SDL_SetWindowSize(g_win, 640 * n.scale, 400 * n.scale);
+    SDL_SetTextureScaleMode(g_tex, n.smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+    if (g_ini_memedit && !memedit::visible()) { memedit::show(); SDL_RaiseWindow(g_win); }
+}
+// ブートモードなど: 入れ替えの一覧 = ゲームのフォルダにあるフロッピーイメージ（名前順）と、いま入っているもの
+static void build_disk_list() {
+    std::error_code ec;
+    g_disk_list.clear();
+    for (auto& de : fs::directory_iterator(P(g_p->ps.cfg.root), ec))
+        if (de.is_regular_file(ec) && is_floppy_image(U8(de.path()))) g_disk_list.push_back(U8(de.path()));
+    std::sort(g_disk_list.begin(), g_disk_list.end(), [](const std::string& x, const std::string& y) { return upper(x) < upper(y); });
+    for (auto& a : {floppy::current_path_unit(0), floppy::current_path_unit(1)}) {   // フォルダの外のイメージも一覧へ
+        if (a.empty() || floppy::is_device_spec(a)) continue;
+        bool have = false;
+        for (auto& x : g_disk_list) if (same_path(x, a)) have = true;
+        if (!have) g_disk_list.push_back(a);
+    }
+}
+
 int main(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_APP_NAME, "PC98PLAYER");
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "512");
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK)) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
@@ -867,7 +1224,7 @@ int main(int argc, char** argv) {
     std::error_code ec;
     fs::path dir, ini_path;
     if (!find_game(argc, argv, &dir, &ini_path)) { SDL_Quit(); return 0; }
-    if (!fs::exists(ini_path, ec)) {
+    if (!fs::exists(ini_path, ec) && !g_boot_override.on) {
         std::string st = guess_start(U8(dir));
         write_template_ini(U8(ini_path), st);
         message(SDL_MESSAGEBOX_INFORMATION, "PC98PLAYER.INI が無かったので、ひな形を作りました。\n\n" +
@@ -876,39 +1233,26 @@ int main(int argc, char** argv) {
         if (st.empty()) return 1;
     }
     Ini ini;
-    load_ini_any(U8(ini_path), ini);
-    // Root=: ゲームのフォルダを INI とは別の場所にする（INI からの相対パス可）
-    {
-        std::string rt = ini.get("PC98PLAYER.ROOT", "");
-        if (!rt.empty()) {
-            fs::path r = P(rt);
-            fs::path cand = norm(r.is_absolute() ? r : ini_path.parent_path() / r);
-            if (fs::is_directory(cand, ec)) dir = cand;
-            else message(SDL_MESSAGEBOX_WARNING, "Root= のフォルダが見つかりません:\n" + U8(cand) + "\n\nINI のあるフォルダで起動します。");
-        }
-    }
+    if (fs::exists(ini_path, ec)) { load_ini_any(U8(ini_path), ini); g_ini_path = ini_path; }
+    g_base_dir = dir;
     PlayerSettings ps;
-    player_settings_from_ini(ini, U8(dir), &ps);
-    if (ps.cfg.start.empty()) ps.cfg.start = guess_start(U8(dir));
-    if (ps.cfg.start.empty()) {
+    resolve_settings(ini, &ps, &dir);
+    g_ini_floppy = ps.cfg.floppy_image;
+    g_ini_floppy2 = ps.cfg.floppy_image2;
+    if (ps.cfg.start.empty() && !ps.cfg.boot_fd) {
         message(SDL_MESSAGEBOX_ERROR, "PC98PLAYER.INI の Start= が空です。最初に実行するファイル名を書いてください。\n\n読んだ INI: " +
                 U8(ini_path) + "\nゲームのフォルダ: " + U8(dir));
         return 1;
     }
     if (ps.cfg.trace && !getenv("PC98PLAYER_LOG")) set_log_env(hostfs::join(ps.cfg.root, "PC98PLAYER.LOG"));
-    g_mouse_speed = ini.geti("PC98PLAYER.MOUSESPEED", 100);
-    g_pause_inactive = ini.geti("PC98PLAYER.PAUSEINACTIVE", 0) != 0;
-    g_middle_release = ini.geti("PC98PLAYER.MIDDLERELEASE", 1) != 0;
-    g_mouse_lock_disable = ini.geti("PC98PLAYER.MOUSELOCKDISABLE", 0) != 0;
-    g_audio_frames = std::max(1, std::min(30, ini.geti("PC98PLAYER.AUDIOFRAMES", 4)));
+    std::string startup_note = apply_host_settings(ini);
+    if (!startup_note.empty()) startup_note = "INI のゲームパッドの割り当てが読めません: " + startup_note;
 
     std::string ferr;
     bool font_ok = hostfont_open(ps.font_name, &ferr);
     hostfont_install();
 
-    std::string root = ps.cfg.root;
-    size_t sl = root.find_last_of("\\/");
-    g_title = (ps.title.empty() ? (sl == std::string::npos ? root : root.substr(sl + 1)) : ps.title) + " - PC98PLAYER";
+    set_title_from(ps);
 
     // 窓: Scale= の大きさ（画面に入らなければ縮める）
     int scale = ps.scale;
@@ -928,12 +1272,22 @@ int main(int argc, char** argv) {
     g_p = new Player();
     std::string err;
     if (!g_p->init(ps, &err)) { message(SDL_MESSAGEBOX_ERROR, err); return 1; }
+    if (ps.cfg.boot_fd || !ps.cfg.floppy_image2.empty()) build_disk_list();
     audio_open(ps.sample_rate);
     if (ps.cfg.midi && !midi_open(ps.midi_device)) show_toast("MIDI の出力を開けませんでした");
     if (ps.fullscreen) toggle_fullscreen();
     update_title();
     if (!font_ok) show_toast(ferr);
     if (!g_p->floppy_error.empty()) show_toast(g_p->floppy_error);
+    else if (!startup_note.empty()) show_toast(startup_note);
+    if (g_ini_memedit) {   // メモリエディタを別の窓で開く（本体の窓の右に並べる）
+        memedit::show();
+        int x = 0, y = 0, w = 0, h = 0;
+        SDL_GetWindowPosition(g_win, &x, &y);
+        SDL_GetWindowSize(g_win, &w, &h);
+        memedit::place_beside(x + w, y);
+        SDL_RaiseWindow(g_win);   // キー入力はゲームの窓へ
+    }
     if (getenv("PC98PLAYER_SHOW_RENDERER")) { g_title += std::string(" [") + SDL_GetRendererName(g_ren) + "]"; update_title(); }
 
     const double frame_sec = (double)FRAME_TICKS / MASTER_CLOCK;
@@ -946,7 +1300,18 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&e)) on_event(e, running);
         if (!running) break;
         double t = now();
+        memedit::tick();
         if (g_paused_by_focus) { SDL_WaitEventTimeout(nullptr, 20); next = t; continue; }
+        {   // メモリエディタを操作している間は止める（チェックが入っているとき）
+            bool mp = memedit::pause_requested();
+            if (mp != g_memedit_paused) { g_memedit_paused = mp; update_title(); }
+            if (mp) {
+                if (g_audio && SDL_GetAudioStreamQueued(g_audio) > 0) audio_flush();
+                SDL_WaitEventTimeout(nullptr, 20);
+                next = t;
+                continue;
+            }
+        }
         if (g_menu != MENU_NONE) {
             // 止めている間は溜まった音を捨て、入力を待つだけ
             if (g_audio && SDL_GetAudioStreamQueued(g_audio) > 0) audio_flush();
@@ -966,10 +1331,20 @@ int main(int argc, char** argv) {
             g_mouse_ax -= dx; g_mouse_ay -= dy;
             machine_mouse(g_p->m, dx, dy, g_mouse_btn);
         }
-        int frames = g_turbo ? 8 : 1;
-        for (int i = 0; i < frames; i++) {
-            g_p->run_frame(i == frames - 1);
-            if (!g_turbo) audio_push_frame();
+        pad::poll(g_p->m, (SDL_GetWindowFlags(g_win) & SDL_WINDOW_INPUT_FOCUS) != 0);   // ゲームパッド（窓が前にいるときだけ）
+        if (g_turbo) {
+            // 早送り: 画面 1 枚ぶん（約 1/60 秒）の実時間いっぱいまでフレームを進め、最後の 1 枚だけ描く。
+            // 音は合成しない（捨てるだけなので）
+            double t0 = now();
+            for (int i = 0; i < 64; i++) {
+                bool last = now() - t0 >= 1.0 / 60 || i == 63;
+                g_p->run_frame(last, false);
+                if (last || g_p->m->quit) break;
+            }
+            if (g_audio && SDL_GetAudioStreamQueued(g_audio) > 0) audio_flush();
+        } else {
+            g_p->run_frame(true);
+            audio_push_frame();
         }
         next += frame_sec;
         if (t - next > 0.25) next = t;
@@ -977,7 +1352,10 @@ int main(int argc, char** argv) {
 
         if (g_p->m->quit && !ended_notice) {
             ended_notice = true;
-            if (g_p->m->quit == 2) {
+            if (g_p->m->quit == 3) {   // ROM（N88-BASIC）が要るソフト
+                message(SDL_MESSAGEBOX_INFORMATION, g_p->m->status);
+                running = false;
+            } else if (g_p->m->quit == 2) {
                 message(SDL_MESSAGEBOX_WARNING, "エミュレーションを続けられなくなりました。\n" + g_p->m->status);
                 running = false;
             } else if (g_p->ps.exit_on_end) running = false;
