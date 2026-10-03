@@ -75,7 +75,7 @@ dist: ymfm deps
 	$(VENDOR_ENV) cmake -S sdl -B $(B)/app $(CMAKE_COMMON) $(VENDOR_FLAGS) -DFREETYPE_DIR=$(DEPS) $(APP_FLAGS)
 	cmake --build $(B)/app -j$(JOBS)
 	rm -rf $(DIST)/$(TAG) && mkdir -p $(DIST)/$(TAG)
-	cp -R $(B)/app/$(APP) README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html $(DIST)/$(TAG)/
+	cp -R $(B)/app/$(APP) README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual $(DIST)/$(TAG)/
 	cp $(SRC)/SDL/LICENSE.txt $(DIST)/$(TAG)/THIRD-PARTY-SDL3-LICENSE.txt
 	cp $(SRC)/freetype/docs/FTL.TXT $(DIST)/$(TAG)/THIRD-PARTY-FreeType-LICENSE.txt
 ifeq ($(OS),macos)
