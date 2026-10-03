@@ -137,7 +137,8 @@ int main(int argc, char** argv) {
         for (auto& e : fdev) if (e.first == f) {
             std::string er, path = e.second; int unit = 0;
             if (path.size() > 2 && path[0] == '#' && path[2] == '#') { unit = path[1] - '0'; path = path.substr(3); }   // --fd f:#1#path = 2 台目
-            fprintf(stderr, "fd insert u%d %s: %s\n", unit, path.c_str(), floppy::insert_unit(unit, path, &er) ? "ok" : er.c_str());
+            if (path == "-") { floppy::eject_unit(unit); fprintf(stderr, "fd eject u%d\n", unit); }   // --fd f:#0#- = 取り出す
+            else fprintf(stderr, "fd insert u%d %s: %s\n", unit, path.c_str(), floppy::insert_unit(unit, path, &er) ? "ok" : er.c_str());
             fprintf(stderr, "  now u0=%s u1=%s\n", floppy::current_path_unit(0).c_str(), floppy::current_path_unit(1).c_str());
         }
         { extern int g_trace_port_lo, g_trace_port_hi; static int saved_lo = -1, saved_hi = -1;

@@ -115,6 +115,7 @@ namespace floppy {
     // ドライブ（ユニット）を指定して入れる／取り出す。0 = 上と同じ、1 = 2 台目（ブートモード用。DOS からは見えない）
     bool insert_unit(int unit, const std::string& path, std::string* err);
     void eject_unit(int unit);
+    void clear_swap_flags();              // 起動時・ステートロードで入れたものは「入れ替え」として扱わない
     FloppyImage* image_unit(int unit);
     std::string current_path_unit(int unit);
     // イメージの中身を調べる（読めなければ false）。dos = MS-DOS のファイル表がある、bootable = IPL がある

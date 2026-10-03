@@ -190,6 +190,25 @@ ExitOnEnd=0</pre>
   <li>インストーラが <code>COMMAND.COM /C COPY …</code> のように呼ぶ内部コマンド（COPY・MD・DEL など）にも対応しています。</li>
   <li>インストールが終わったら、<code>Start=</code> などをゲームの起動用に書き換えます（<code>FloppyImage=</code> はキーディスクが要らなければ消します）。</li>
 </ul>
+<h3>フロッピードライブを 2 台使うインストーラ</h3>
+<p>「インストーラのディスクを 2 台目のドライブに、データのディスクを 1 台目のドライブに」のように、2 台のドライブを前提にしたインストーラは、
+<code>FloppyDisk2=</code>・<code>FloppyDrive2=</code> で 2 台目にもディスクを入れます。例: ドライブ A: をハードディスク（インストール先）、B: を 1 台目、C: を 2 台目にする場合</p>
+<pre>[PC98PLAYER]
+Drive=A
+FloppyDrive=B
+FloppyDisk=DN4_A.NFD     ; 1 台目（B:）: 最初に求められるデータのディスク
+FloppyDrive2=C
+FloppyDisk2=DN4_C.NFD    ; 2 台目（C:）: インストーラ（INSTALL.EXE）のあるディスク
+Start=C:\INSTALL.EXE
+Args=A:
+FloppyWriteProtect=1     ; 「ライトプロテクト状態ではありません」と止まるインストーラ向け
+ExitOnEnd=0</pre>
+<ul>
+  <li>「○ディスクをドライブ１に入れて下さい」と出たら、<kbd>F11</kbd> の画面のフロッピーの欄で、操作するドライブ（<kbd>D</kbd> で切り替え）を 1 台目にして、<kbd>N</kbd>／<kbd>P</kbd> で求められたディスクにします。</li>
+  <li>ディスクの入れ替えを「いったん抜かれて、また入った」ことで確かめるインストーラもあるので、入れ替えた直後はディスク BIOS の SENSE に少しの間「準備ができていない」と答えます（実機でディスクを抜き差ししたときと同じ）。求められたディスクが最初から入っていて先へ進まないときは、同じディスクをもう一度入れ直してください。</li>
+  <li>「フロッピーディスクがライトプロテクト状態ではありません」と止まるときは、<code>FloppyWriteProtect=1</code> を書くと、入れるディスクがすべて書き込み禁止になります。1 枚ずつなら、<kbd>F11</kbd> →「F: 入れる／実機…」のメニューの「書き込み禁止（ライトプロテクト）」で切り替えられます（入れ替えると、そのイメージの元の状態に戻ります）。</li>
+  <li>インストールが終わったら、<code>Start=</code> を作られた起動用のバッチ（例: <code>DRA4\DRA4.BAT</code>）に書き換え、<code>FloppyDisk=</code> などは消します。</li>
+</ul>
 
 <h2 id="keydisk">3-10. キーディスク・プロテクトについて</h2>
 <p>PC98PLAYER のディスク BIOS（INT 1Bh）は、ID を指定したセクタの読み込み・READ ID・READ DIAGNOSTIC などに応え、イメージに記録されたセクタの ID・CRC エラー・デリーテッドデータ、

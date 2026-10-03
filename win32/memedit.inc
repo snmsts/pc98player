@@ -31,6 +31,11 @@ static int s_cw = 8, s_ch = 16;                // 等幅フォントの 1 文字
 static uint32_t s_top = 0;                     // ダンプの先頭行のアドレス
 static uint32_t s_cur = 0;                     // 選んでいるバイト
 static int s_nib = 0;                          // 0 = 上位 4 ビットを待つ, 1 = 下位
+static uint32_t s_anchor = 0;                  // 範囲指定の起点（s_cur と同じなら範囲なし）
+static bool s_dragging = false;
+static uint32_t sel_lo() { return std::min(s_anchor, s_cur); }
+static uint32_t sel_hi() { return std::max(s_anchor, s_cur); }
+static bool has_range() { return s_anchor != s_cur; }
 static std::vector<uint8_t> s_prev;            // 前回見たときの内容
 static std::vector<uint8_t> s_age;             // 変わってからの残り表示回数（赤く示す時間。約 1 秒）
 static std::vector<uint8_t> s_snap;            // 検索バッファ
@@ -189,7 +194,7 @@ static void ensure_visible() {
 }
 static void go_to(uint32_t a) {
     if (a >= MEM_SIZE) a = MEM_SIZE - 1;
-    s_cur = a; s_nib = 0;
+    s_cur = a; s_anchor = a; s_nib = 0;
     int rows = dump_rows();
     uint32_t row = a / ROW_BYTES * ROW_BYTES;
     s_top = row >= (uint32_t)(rows / 2) * ROW_BYTES ? row - (uint32_t)(rows / 2) * ROW_BYTES : 0;
@@ -236,6 +241,8 @@ static void paint_dump(HDC dc0, const RECT& rc) {
             COLORREF fg = changed ? RGB(255, 90, 90) : RGB(225, 228, 235), bk = RGB(20, 22, 30);
             if (s_use_blocks && !changed && !in_blocks(a)) fg = RGB(95, 98, 110);   // サーチの対象外（ゲーム以外）は暗く
             if (is_cand(a)) bk = RGB(70, 60, 20);
+            bool insel = has_range() && a >= sel_lo() && a <= sel_hi();
+            if (insel) { bk = RGB(45, 75, 130); if (!changed) fg = RGB(255, 255, 255); }   // 範囲指定
             if (a == s_cur) { bk = RGB(80, 150, 255); fg = RGB(255, 255, 255); }
             wchar_t hb[4]; swprintf(hb, 4, L"%02X", v);
             SetBkColor(dc, bk); SetTextColor(dc, fg);
@@ -246,7 +253,7 @@ static void paint_dump(HDC dc0, const RECT& rc) {
             }
             // 文字（ASCII と半角カナ）
             wchar_t ch = (v >= 0x20 && v < 0x7F) ? (wchar_t)v : (v >= 0xA1 && v <= 0xDF) ? (wchar_t)(0xFF61 + v - 0xA1) : L'.';
-            SetBkColor(dc, a == s_cur ? RGB(80, 150, 255) : RGB(20, 22, 30));
+            SetBkColor(dc, a == s_cur ? RGB(80, 150, 255) : insel ? RGB(45, 75, 130) : RGB(20, 22, 30));
             SetTextColor(dc, changed ? RGB(255, 90, 90) : RGB(150, 155, 170));
             TextOutW(dc, (9 + ROW_BYTES * 3 + 1 + i) * s_cw, y, &ch, 1);
         }
@@ -262,16 +269,39 @@ static LRESULT CALLBACK dump_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         paint_dump(dc, rc);
         EndPaint(h, &ps); return 0; }
     case WM_ERASEBKGND: return 1;
-    case WM_LBUTTONDOWN: {
-        SetFocus(h);
-        int x = (short)LOWORD(lp) / s_cw, y = (short)HIWORD(lp) / s_ch - 1;
-        if (y < 0) return 0;
+    case WM_LBUTTONDOWN: case WM_MOUSEMOVE: {
+        if (msg == WM_MOUSEMOVE && !s_dragging) return 0;
+        if (msg == WM_LBUTTONDOWN) SetFocus(h);
+        int px = (short)LOWORD(lp), py = (short)HIWORD(lp);
+        int x = px / s_cw, y = (py >= 0 ? py / s_ch : -1) - 1;
+        if (msg == WM_MOUSEMOVE) {   // 範囲指定の途中: 上下にはみ出したら 1 行ずつ送る
+            int rows = dump_rows();
+            if (y < 0 && s_top >= ROW_BYTES) { s_top -= ROW_BYTES; y = 0; }
+            else if (y < 0) y = 0;
+            if (y >= rows) { if (s_top + (uint32_t)rows * ROW_BYTES < MEM_SIZE) s_top += ROW_BYTES; y = rows - 1; }
+            SetScrollPos(h, SB_VERT, (int)(s_top / ROW_BYTES), TRUE);
+            if (x < 9) x = 9;
+        } else if (y < 0) return 0;
         int col = -1;
         if (x >= 9 && x < 9 + ROW_BYTES * 3) col = (x - 9) / 3;
         else if (x >= 9 + ROW_BYTES * 3 + 1 && x < 9 + ROW_BYTES * 4 + 1) col = x - (9 + ROW_BYTES * 3 + 1);
-        if (col >= 0) { s_cur = s_top + (uint32_t)y * ROW_BYTES + (uint32_t)col; if (s_cur >= MEM_SIZE) s_cur = MEM_SIZE - 1; s_nib = 0; }
+        else if (msg == WM_MOUSEMOVE) col = x < 9 + ROW_BYTES * 3 ? 0 : ROW_BYTES - 1;
+        if (col >= 0) {
+            uint32_t a = s_top + (uint32_t)y * ROW_BYTES + (uint32_t)col; if (a >= MEM_SIZE) a = MEM_SIZE - 1;
+            s_cur = a; s_nib = 0;
+            // クリック = 選び直し（Shift を押しながらなら範囲を広げる）。押したまま動かすと範囲指定
+            if (msg == WM_LBUTTONDOWN) {
+                if (!(GetKeyState(VK_SHIFT) & 0x8000)) s_anchor = a;
+                s_dragging = true; SetCapture(h);
+            }
+        }
+        if (has_range()) {
+            wchar_t b[96]; swprintf(b, 96, L"範囲 %05X〜%05X（%u バイト）: W で範囲に書き込み", sel_lo(), sel_hi(), sel_hi() - sel_lo() + 1);
+            set_status(b);
+        }
         InvalidateRect(h, nullptr, FALSE);
         return 0; }
+    case WM_LBUTTONUP: if (s_dragging) { s_dragging = false; ReleaseCapture(); } return 0;
     case WM_MOUSEWHEEL: {
         int d = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * 3;
         int64_t t = (int64_t)s_top - (int64_t)d * ROW_BYTES;
@@ -318,6 +348,7 @@ static LRESULT CALLBACK dump_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (c < 0) c = 0; if (c >= (int64_t)MEM_SIZE) c = MEM_SIZE - 1;
         s_cur = (uint32_t)c; s_nib = 0;
+        if (!(GetKeyState(VK_SHIFT) & 0x8000)) s_anchor = s_cur;   // Shift+カーソルキーで範囲を広げる
         ensure_visible();
         InvalidateRect(h, nullptr, FALSE);
         return 0; }
@@ -330,8 +361,9 @@ static LRESULT CALLBACK dump_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         uint8_t v = m[s_cur];
         v = s_nib == 0 ? (uint8_t)((v & 0x0F) | (d << 4)) : (uint8_t)((v & 0xF0) | d);
         m[s_cur] = v;                 // その場で書き換える
+        s_anchor = s_cur;             // 1 バイトずつの書き換えは範囲を解く
         if (s_nib == 0) s_nib = 1;
-        else { s_nib = 0; if (s_cur + 1 < MEM_SIZE) s_cur++; ensure_visible(); }
+        else { s_nib = 0; if (s_cur + 1 < MEM_SIZE) s_cur++; s_anchor = s_cur; ensure_visible(); }
         InvalidateRect(h, nullptr, FALSE);
         return 0; }
     }
@@ -339,6 +371,9 @@ static LRESULT CALLBACK dump_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // ---- 候補の一覧 ------------------------------------------------------------
+}  // namespace memedit
+namespace codeedit { static void append_addr(uint32_t a); }   // codeedit.inc にある
+namespace memedit {
 static int list_rows() { RECT r; GetClientRect(s_list, &r); return std::max(1, (int)(r.bottom / s_ch)); }
 static LRESULT CALLBACK list_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -389,6 +424,11 @@ static LRESULT CALLBACK list_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (k < s_cand.size()) { s_list_sel = (int)k; go_to(s_cand[k]); SetFocus(s_dump); }   // そのまま 16 進を打てば書き換えられる
         InvalidateRect(h, nullptr, FALSE);
         return 0; }
+    case WM_LBUTTONDBLCLK: {   // コードエディタの末尾に「番地 」を書き足す
+        int r = (short)HIWORD(lp) / s_ch;
+        size_t k = (size_t)s_list_top + (size_t)r;
+        if (k < s_cand.size()) { s_list_sel = (int)k; go_to(s_cand[k]); InvalidateRect(h, nullptr, FALSE); codeedit::append_addr(s_cand[k]); }
+        return 0; }
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -431,16 +471,54 @@ static LRESULT CALLBACK addr_sub(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 // ---- コマンド入力（ダンプで W） ---------------------------------------------
 //  選んでいる番地を起点に、1 行のコマンドを実行する。今あるもの:
+//    FF442299               16 進のバイト列（2 桁で 1 バイト）を、選んだ番地から順に書き込む
 //    s99 / m999 / l99999999   10 進の値を 1 / 2 / 4 バイト（下位バイトが先）で書き込む（S/M/L も可）
 //  今後「範囲書き込み」などを足すときは run_command() の解釈を増やす（戻り値の文言がそのまま結果の表示になる）。
 struct CmdResult { bool ok; std::wstring msg; };
+// 16 進のバイト列（"FF442299" のように 2 桁で 1 バイト。空白は無視）を解く。16 進でなければ false
+static bool parse_hex_bytes(const std::wstring& in, std::vector<uint8_t>* out, std::wstring* err) {
+    std::wstring t;
+    for (wchar_t c : in) if (c != L' ' && c != L'\t' && c != L'　') t += c;
+    out->clear();
+    if (t.empty()) { *err = L"値がありません"; return false; }
+    for (wchar_t c : t) if (!iswxdigit(c)) { *err = L"16 進の数字ではありません: " + t; return false; }
+    if (t.size() & 1) { *err = L"16 進は 2 桁で 1 バイトです（桁数が奇数）: " + t; return false; }
+    for (size_t i = 0; i < t.size(); i += 2) out->push_back((uint8_t)wcstoul(t.substr(i, 2).c_str(), nullptr, 16));
+    return true;
+}
+static std::wstring hex_list(const std::vector<uint8_t>& b, size_t max = 16) {
+    std::wstring r;
+    for (size_t i = 0; i < b.size() && i < max; i++) { wchar_t x[4]; swprintf(x, 4, L"%02X", b[i]); if (i) r += L" "; r += x; }
+    if (b.size() > max) r += L" …";
+    return r;
+}
+// 範囲 [lo, hi]（両端を含む）を pattern の繰り返しで埋める。最後の 1 回が範囲に入りきらなければ、入るところまで
+static std::wstring fill_range(uint32_t lo, uint32_t hi, const std::vector<uint8_t>& pat) {
+    uint8_t* m = ram();
+    if (!m || pat.empty()) return L"";
+    uint32_t n = hi - lo + 1;
+    for (uint32_t i = 0; i < n; i++) m[lo + i] = pat[i % pat.size()];
+    wchar_t b[200];
+    swprintf(b, 200, L"%05X〜%05X（%u バイト）を %ls の繰り返しで埋めました%ls", lo, hi, n, hex_list(pat, 8).c_str(),
+             (n % pat.size()) ? L"（最後の 1 回は入るところまで）" : L"");
+    return b;
+}
 static CmdResult run_command(const std::wstring& line, uint32_t addr) {
     uint8_t* m = ram();
     if (!m) return {false, L"メモリがありません"};
     std::wstring t;
     for (wchar_t c : line) if (c != L' ' && c != L'\t' && c != L'　') t += c;
-    if (t.empty()) return {false, L"コマンドを入力してください（例: s99, m999, l99999）"};
+    if (t.empty()) return {false, L"コマンドを入力してください（例: FF4422, s99, m999, l99999）"};
     wchar_t k = (wchar_t)towlower(t[0]);
+    if (has_range()) {   // 範囲指定中: 値（10 進でも 16 進のバイト列でも）の繰り返しで範囲を埋める
+        std::vector<uint8_t> pat; std::wstring err;
+        if ((k == L's' || k == L'm' || k == L'l') && t.size() >= 2) {
+            uint32_t v; int n;
+            if (!parse_value(t, &v, &n, &err)) return {false, err};
+            for (int i = 0; i < n; i++) pat.push_back((uint8_t)(v >> (8 * i)));
+        } else if (!parse_hex_bytes(t, &pat, &err)) return {false, err};
+        return {true, fill_range(sel_lo(), sel_hi(), pat)};
+    }
     if ((k == L's' || k == L'm' || k == L'l') && t.size() >= 2) {
         uint32_t v; int n; std::wstring err;
         if (!parse_value(t, &v, &n, &err)) return {false, err};
@@ -451,7 +529,17 @@ static CmdResult run_command(const std::wstring& line, uint32_t addr) {
         wchar_t b[160]; swprintf(b, 160, L"%05X に %u（%0*Xh）を %d バイトで書き込みました: %ls", addr, v, n * 2, v, n, bytes.c_str());
         return {true, b};
     }
-    return {false, L"知らないコマンドです: " + t + L"（今使えるのは s99・m999・l99999 の 10 進書き込み）"};
+    {   // 16 進のバイト列: FF442299 → FF 44 22 99 を選んだ番地から順に書く
+        std::vector<uint8_t> bytes; std::wstring err;
+        if (parse_hex_bytes(t, &bytes, &err)) {
+            if (addr + bytes.size() > MEM_SIZE) return {false, L"640KB の終わりを越えます"};
+            for (size_t i = 0; i < bytes.size(); i++) m[addr + i] = bytes[i];
+            wchar_t b[200]; swprintf(b, 200, L"%05X から %u バイト書き込みました: %ls", addr, (unsigned)bytes.size(), hex_list(bytes).c_str());
+            return {true, b};
+        }
+        if (iswxdigit(t[0]) && t.find_first_not_of(L"0123456789abcdefABCDEF") == std::wstring::npos) return {false, err};
+    }
+    return {false, L"知らないコマンドです: " + t + L"（使えるのは FF4422 のような 16 進のバイト列と、s99・m999・l99999 の 10 進書き込み）"};
 }
 static void command_exec() {
     wchar_t b[256] = L""; GetWindowTextW(s_cmd_edit, b, 256);
@@ -491,13 +579,15 @@ static void open_command() {
             SendMessageW(c, WM_SETFONT, (WPARAM)s_ui, TRUE);
             return c;
         };
-        mk(L"STATIC", L"コマンド（例: s99 = 1 バイト、m999 = 2 バイト、l99999 = 4 バイトの 10 進）", SS_LEFT, 0, S(10), S(8), S(440), S(20));
+        mk(L"STATIC", L"FF4422… = 16 進のバイト列　s99 / m999 / l99999 = 10 進（1/2/4 バイト）", SS_LEFT, 0, S(10), S(8), S(440), S(20));
         s_cmd_edit = mk(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, 0, S(10), S(32), S(350), S(26));
         mk(L"BUTTON", L"送信", BS_DEFPUSHBUTTON, ID_CMD_RUN, S(368), S(32), S(82), S(26));
         s_cmd_msg = mk(L"STATIC", L"", SS_LEFT, 0, S(10), S(66), S(440), S(36));
         s_cmd_proc = (WNDPROC)SetWindowLongPtrW(s_cmd_edit, GWLP_WNDPROC, (LONG_PTR)cmd_edit_sub);
     }
-    wchar_t t[64]; swprintf(t, 64, L"コマンド入力 - 番地 %05X", s_cur);
+    wchar_t t[96];
+    if (has_range()) swprintf(t, 96, L"コマンド入力 - 範囲 %05X〜%05X（%u バイト）に繰り返し書き込み", sel_lo(), sel_hi(), sel_hi() - sel_lo() + 1);
+    else swprintf(t, 96, L"コマンド入力 - 番地 %05X", s_cur);
     SetWindowTextW(s_cmd, t);
     SetWindowTextW(s_cmd_msg, L"Enter で送信、Esc でやめる");
     // ダンプの選んだバイトの近くに出す
@@ -579,7 +669,7 @@ static void create(HINSTANCE inst) {
     dc.lpfnWndProc = dump_proc; dc.hInstance = inst; dc.hCursor = LoadCursor(nullptr, IDC_IBEAM); dc.lpszClassName = L"PC98PLAYER_MEMDUMP";
     RegisterClassExW(&dc);
     WNDCLASSEXW lc = {sizeof(lc)};
-    lc.lpfnWndProc = list_proc; lc.hInstance = inst; lc.hCursor = LoadCursor(nullptr, IDC_HAND); lc.lpszClassName = L"PC98PLAYER_MEMLIST";
+    lc.lpfnWndProc = list_proc; lc.style = CS_DBLCLKS; lc.hInstance = inst; lc.hCursor = LoadCursor(nullptr, IDC_HAND); lc.lpszClassName = L"PC98PLAYER_MEMLIST";
     RegisterClassExW(&lc);
 
     { HDC dc = GetDC(nullptr); s_k = GetDeviceCaps(dc, LOGPIXELSY) / 96.0; ReleaseDC(nullptr, dc); if (s_k < 1.0) s_k = 1.0; }
@@ -596,7 +686,7 @@ static void create(HINSTANCE inst) {
     int dump_w = (9 + ROW_BYTES * 4 + 2) * s_cw + GetSystemMetrics(SM_CXVSCROLL) + S(24);
     {   // 上の段（番地・移動・止める・説明）が収まる幅
         HDC dc = GetDC(nullptr); HGDIOBJ o = SelectObject(dc, s_ui);
-        SIZE sz; const wchar_t* t = L"0-9 A-F: 書き換え　W: コマンド";
+        SIZE sz; const wchar_t* t = L"0-9 A-F: 書き換え　ドラッグ: 範囲　W: コマンド";
         GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
         SelectObject(dc, o); ReleaseDC(nullptr, dc);
         dump_w = std::max(dump_w, S(448) + (int)sz.cx + S(16));
@@ -615,7 +705,7 @@ static void create(HINSTANCE inst) {
     HWND go = mk(L"BUTTON", L"移動", BS_PUSHBUTTON, ID_GO); MoveWindow(go, S(166), S(8), S(60), S(26), TRUE);
     s_pause = mk(L"BUTTON", L"操作中はゲームを止める", BS_AUTOCHECKBOX, ID_PAUSE);
     MoveWindow(s_pause, S(236), S(10), S(196), S(22), TRUE);
-    s_hint = mk(L"STATIC", L"0-9 A-F: 書き換え　W: コマンド", SS_LEFT, 0);
+    s_hint = mk(L"STATIC", L"0-9 A-F: 書き換え　ドラッグ: 範囲　W: コマンド", SS_LEFT, 0);
     s_dump = CreateWindowExW(WS_EX_CLIENTEDGE, L"PC98PLAYER_MEMDUMP", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP,
                              0, 0, 10, 10, s_wnd, nullptr, inst, nullptr);
     SCROLLINFO si = {sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS, 0, (int)(MEM_SIZE / ROW_BYTES) - 1, 28, 0};
