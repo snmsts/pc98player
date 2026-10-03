@@ -66,6 +66,8 @@ ol.steps > li { margin-bottom: 8px; }
 figure { margin: 14px 0 20px; }
 figure img { display: block; max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px; background: #000; image-rendering: auto; }
 figure img.pixel { image-rendering: pixelated; }
+.figrow { display: flex; flex-wrap: wrap; gap: 14px; }
+.figrow figure { flex: 1 1 300px; margin: 0 0 6px; }
 figure figcaption { color: var(--muted); font-size: .9em; margin-top: 6px; }
 
 /* 手順の流れ（横並びの箱） */

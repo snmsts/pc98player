@@ -90,6 +90,7 @@ FakeDate=1999/12/31    ; 起動した日を 1999 年 12 月 31 日にする（�
 <h2 id="sound">4-5. 音が出ない・おかしい</h2>
 <ul>
   <li><strong>BGM がまったく鳴らない:</strong> <code>Start=</code> がゲーム本体を直接指していて、サウンドドライバ（MUSIC.COM・PMD.COM など）が組み込まれていないことがあります。CONFIG.SYS の <code>SHELL=</code> に書かれたプログラムや <code>AUTOEXEC.BAT</code> など、ドライバを組み込んでからゲームを起動するものを <code>Start=</code> に書いてください（例: メルクリウスプリティは <code>Start=MPSTART.COM</code>）。</li>
+  <li><strong>「メモリスイッチのサウンドを『サウンド BIOS を切り離す』にしてください」とマニュアルにあるソフト:</strong> PC98PLAYER にはサウンド BIOS が無いので、何も設定しなくてもその状態です（Dante98 の MUSIC.COM などはそのまま鳴ります）。</li>
   <li><code>SoundBoard=26</code> と <code>SoundBoard=86</code> を切り替えてみます。</li>
   <li>ゲーム側の音源設定（「FM 音源」「MIDI」など）を確認します。ゲームの設定画面で「MIDI」が選べないときは、INI に <code>MIDI=1</code> があるか確認してください。</li>
   <li>音が小さいときは <code>Volume=200</code> くらいまで上げてみます（FM と PCM の釣り合いは <code>FMVolume=</code>・<code>PCMVolume=</code> で）。</li>
@@ -103,6 +104,7 @@ FakeDate=1999/12/31    ; 起動した日を 1999 年 12 月 31 日にする（�
   <li><strong>マウスで固まる・カーソルが二重になる:</strong> ゲームが自前でマウスを読む場合は <code>MouseDriver=0</code> を試します。</li>
   <li><strong>マウスが速すぎる／遅すぎる:</strong> <code>MouseSpeed=</code>（%）で調整します。</li>
   <li><strong>マウスを使わないゲームで窓の行き来が面倒:</strong> <code>MouseLockDisable=1</code> でマウスを捕まえなくなります。</li>
+  <li><strong>マウスを使うゲームで、メモリエディタなどほかの窓へマウスを持っていくのが面倒:</strong> <code>MouseLockDisable=2</code> にすると、マウスを捕まえずに、カーソルがゲームの画面の上にある間だけゲームへ送ります（<kbd>F12</kbd> で放す必要がありません）。</li>
   <li><strong>ゲームパッドが効かない:</strong> 使い始めると画面の下に「ゲームパッドを使います: （名前）」と出ます。出ないときは Windows の「USB ゲーム コントローラーのセットアップ」（<code>joy.cpl</code>）に出ているか確かめ、2 台以上あるなら <code>JoyDevice=</code> で番号を選びます。ゲームパッドは窓が前に出ているときだけ効きます。</li>
   <li><strong>ゲームパッドで方向は動くがボタンが効かない／その逆:</strong> ジョイスティックに対応していないゲームです。<code>JoyDirection=CURSOR</code> と <code>JoyButton1=RETURN</code> のようにキーを割り当てます（<a href="ch1.html#gamepad">第一章 1-11</a>）。ゲームの設定画面で「ジョイスティック」を選ぶ必要があるソフトもあります。</li>
   <li><strong>INI の変更を試すたびに起動し直すのが面倒:</strong> <kbd>F11</kbd> → <kbd>R</kbd>（プログラム再起動）で INI を読み直します（<a href="ch1.html#reload">第一章 1-8</a>）。</li>

@@ -210,6 +210,7 @@ bool Player::init(const PlayerSettings& s, std::string* err) {
             plog("[fd] %s\n", floppy_error.c_str());
         }
     }
+    floppy::clear_swap_flags();
     if (ps.cfg.boot_fd) {
         // ブートモード: 1 台目の IPL から起動する
         std::string why;
@@ -425,6 +426,7 @@ bool Player::restore(const uint8_t* data, size_t len) {
         }
     }
     r.tag("END ");
+    floppy::clear_swap_flags();
     if (!r.ok) return false;
     // 音源チップ: 内部状態があれば丸ごと戻す（鳴りかけの音の余韻まで一致する）。
     // 無ければレジスタの控えから作り直し、鳴っていた FM の音を鳴らし直す。

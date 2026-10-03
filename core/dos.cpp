@@ -105,6 +105,9 @@ static uint16_t s_last_err;
 static std::string s_cwd;      // ゲスト側のカレント（先頭の \ なし、大文字）。ゲームのドライブ
 static std::string s_fdcwd;    // フロッピーのドライブのカレント
 static std::string s_fdcwd2;   // 2 台目のフロッピーのドライブのカレント
+// SUBST で作ったドライブ（ドライブ名 → ホストのパス）と、そのカレント
+static std::map<char, std::string> s_subst;
+static std::map<char, std::string> s_subst_cwd;
 static char s_curdrv;          // カレントドライブ（0 = ゲームのドライブ）
 static char s_sg_drive;        // 直前に split_guest が解いたパスのドライブ
 static uint32_t s_fd_change = 0xFFFFFFFFu;
@@ -193,8 +196,12 @@ static bool valid83(const std::string& name) {
 static uint16_t hdd_free_clusters(Machine* m) { return (uint16_t)(m->cfg.free_mb * 64); }
 static uint16_t hdd_total_clusters(Machine* m) { uint32_t t = (uint32_t)m->cfg.free_mb * 64 + 2048; if (t < 8192) t = 8192; if (t > 0xFFF0) t = 0xFFF0; return (uint16_t)t; }
 static char cur_drive(Machine* m) { return s_curdrv ? s_curdrv : m->cfg.drive; }
-static bool drive_valid(Machine* m, char d) { return d == m->cfg.drive || floppy::unit_of_letter(d) >= 0; }
-static std::string& cwd_of(Machine* m, char d) { return d == m->cfg.drive ? s_cwd : floppy::unit_of_letter(d) == 1 ? s_fdcwd2 : s_fdcwd; }
+static bool drive_valid(Machine* m, char d) { return d == m->cfg.drive || floppy::unit_of_letter(d) >= 0 || s_subst.count(d); }
+static std::string& cwd_of(Machine* m, char d) {
+    if (d == m->cfg.drive) return s_cwd;
+    if (s_subst.count(d)) return s_subst_cwd[d];
+    return floppy::unit_of_letter(d) == 1 ? s_fdcwd2 : s_fdcwd;
+}
 static const std::vector<HostDirEntry>& dir_list(const std::string& hostdir) {
     if (s_fd_change != floppy::change_count()) { s_fd_change = floppy::change_count(); s_dircache.clear(); }
     auto it = s_dircache.find(hostdir);
@@ -254,6 +261,7 @@ static bool split_guest(const std::string& in, std::vector<std::string>& comps, 
 // ゲストのパスをホストのパスへ。存在しない最後の要素は大文字のまま付ける。
 static std::string drive_root(Machine* m, char d) {
     if (d == m->cfg.drive || !d) return m->cfg.root;
+    { auto it = s_subst.find(d); if (it != s_subst.end()) return it->second; }   // SUBST で作ったドライブ
     if (d == floppy::drive_letter() && !floppy::folder().empty()) return floppy::folder();   // フォルダを入れたフロッピー
     return fatfs::root_path(d);   // フロッピー（それ以外のドライブ名は何も無い扱い）
 }
@@ -752,6 +760,28 @@ static int load_program(Machine* m, const std::string& guest, const std::string&
         block_paras = (uint16_t)(maxp < largest ? maxp : largest);
         if (block_paras < minp) block_paras = (uint16_t)minp;
         if (mem_alloc(m, block_paras, 0xFFFF, &psp, nullptr)) { mem_free(m, env_seg); return 8; }
+        {
+            // EXEPACK で縮めたプログラムは、最初の 64KB（セグメント 1000h 未満）に読み込まれると
+            // 展開に失敗して「Packed file is corrupt」で終わる（MS-DOS 5 の LOADFIX と同じ問題）。
+            // 1000h より下に置かれそうなら、下に詰め物のブロックを置いて 64KB より上へ読み込む
+            static const char sig[] = "Packed file is corrupt";
+            bool exepack = std::search(data.begin(), data.end(), sig, sig + sizeof(sig) - 1) != data.end();
+            if (exepack && psp < 0x1000) {
+                mem_free(m, psp);
+                uint16_t fill = 0, lg2 = 0;
+                bool ok = !mem_alloc(m, (uint16_t)(0x1000 - psp), 0xFFFF, &fill, nullptr);
+                if (ok) {
+                    mem_alloc(m, 0xFFFF, 0, &dummy, &lg2);
+                    uint16_t bp2 = (uint16_t)(maxp < lg2 ? maxp : lg2);
+                    if (bp2 >= minp && !mem_alloc(m, bp2, 0xFFFF, &psp, nullptr)) {
+                        block_paras = bp2;
+                        if (m->cfg.trace) plog("[dos] %s は EXEPACK なので 64KB より上（%04X）へ読み込みます\n", base.c_str(), psp);
+                        mem_free(m, fill);
+                    } else { mem_free(m, fill); ok = false; }
+                }
+                if (!ok && mem_alloc(m, block_paras, 0xFFFF, &psp, nullptr)) { mem_free(m, env_seg); return 8; }
+            }
+        }
         uint16_t load = (uint16_t)(psp + 0x10);
         for (uint32_t i = 0; i < imgsize; i++) m->ram[(lin(load, 0) + i) & 0xFFFFF] = data[hdrbytes + i];
         for (uint32_t i = 0; i < crlc; i++) {
@@ -1323,7 +1353,7 @@ static void dos_exec(Machine* m) {
         {
             std::string up = upper_dbcs(prog);
             static const char* const internal[] = {"COPY", "XCOPY", "DEL", "ERASE", "MD", "MKDIR", "RD", "RMDIR", "REN", "RENAME",
-                                                   "TYPE", "ECHO", "CD", "CHDIR", "CLS", "SET", "PATH", "DIR", "VER", "VOL", "REM", "ATTRIB"};
+                                                   "TYPE", "ECHO", "CD", "CHDIR", "CLS", "SET", "PATH", "DIR", "VER", "VOL", "REM", "ATTRIB", "SUBST"};
             bool is_int = up.size() == 2 && up[1] == ':';
             for (const char* k : internal) if (up == k) is_int = true;
             if (is_int) {
@@ -1462,7 +1492,7 @@ static void int21(Machine* m) {
         if (d == floppy::drive_letter() && !floppy::folder().empty()) {   // フォルダのフロッピー: 1.25MB の 2HD らしく見せる
             SETAX(m, 1); SETBX(m, 600); SETCX(m, 1024); SETDX(m, 1221); return;
         }
-        if (d != m->cfg.drive) {
+        if (d != m->cfg.drive && !s_subst.count(d)) {   // SUBST のドライブはゲームのドライブと同じ大きさに見せる
             uint32_t spc, bps, fr, tot;
             if (!fatfs::free_space_drive(d, &spc, &bps, &fr, &tot)) { SETAX(m, 0xFFFF); return; }
             SETAX(m, (uint16_t)spc); SETBX(m, (uint16_t)fr); SETCX(m, (uint16_t)bps); SETDX(m, (uint16_t)tot); return;
@@ -1867,6 +1897,41 @@ static bool run_command(Machine* m, const std::string& cmdline) {
         return false;
     }
     if (cmd == "LH" || cmd == "LOADHIGH") return run_command(m, arg);
+    if (cmd == "SUBST") {
+        // SUBST X: パス   … パス（ディレクトリ）を X: として見せる
+        // SUBST X: /D     … 取り消す
+        // SUBST           … 一覧
+        std::vector<std::string> w;
+        { std::string cur; for (char c : arg) { if (c == ' ' || c == '\t') { if (!cur.empty()) w.push_back(cur); cur.clear(); } else cur.push_back(c); } if (!cur.empty()) w.push_back(cur); }
+        if (w.empty()) {
+            for (auto& kv : s_subst) shell_print(m, std::string(1, kv.first) + ": => " + hostfs::to_sjis(kv.second));
+            return false;
+        }
+        std::string dl = upper_dbcs(w[0]);
+        char d = dl.size() == 2 && dl[1] == ':' ? dl[0] : 0;
+        if (d < 'A' || d > 'Z') { shell_print(m, "Invalid parameter"); return false; }
+        if (w.size() >= 2 && upper_dbcs(w[1]) == "/D") {
+            if (!s_subst.erase(d)) shell_print(m, "Invalid parameter");
+            s_subst_cwd.erase(d);
+            if (s_curdrv == d) s_curdrv = 0;
+            dir_invalidate();
+            if (m->cfg.trace) plog("[dos] SUBST %c: /D\n", d);
+            return false;
+        }
+        if (w.size() < 2) { shell_print(m, "Invalid parameter"); return false; }
+        // ゲームのドライブ・フロッピーのドライブには重ねられない
+        if (d == m->cfg.drive || floppy::unit_of_letter(d) >= 0) { shell_print(m, "Invalid parameter"); return false; }
+        std::vector<std::string> comps; split_guest(w[1], comps, nullptr);
+        bool ex = false;
+        std::string host = host_of(m, comps, comps.size(), &ex);
+        HostDirEntry he;
+        if (!ex || !hostfs::stat(host, he) || !he.is_dir) { shell_print(m, "Path not found - " + w[1]); return false; }
+        s_subst[d] = host;
+        s_subst_cwd[d].clear();
+        dir_invalidate();
+        if (m->cfg.trace) plog("[dos] SUBST %c: %s → %s\n", d, w[1].c_str(), host.c_str());
+        return false;
+    }
     if (cmd == "ECHO" || cmd.rfind("ECHO.", 0) == 0) {
         if (cmd != "ECHO") { shell_print(m, cmd.size() > 5 ? line.substr(5) : ""); return false; }
         if (uarg == "OFF" || uarg == "ON") return false;
@@ -2336,6 +2401,7 @@ void dos_init(Machine* m) {
     s_sft[4].kind = 2; s_sft[4].refs = 1;
     s_frames.clear(); s_search.clear(); s_batch.clear(); s_env.clear();
     s_cwd.clear(); s_dircache.clear(); s_fdcwd.clear(); s_fdcwd2.clear(); s_curdrv = 0; s_sg_drive = 0;
+    s_subst.clear(); s_subst_cwd.clear();
     keytab_default(); s_pending_input.clear();
     s_retcode = 0; s_retcode_last = 0; s_shell_wait = 0; s_shell_running = false;
     s_alloc_strategy = 0;
@@ -2461,6 +2527,20 @@ void dos_init(Machine* m) {
     }
     sft_sync_guest(m);
 
+    // 使われていない割込みベクタは、実機の MS-DOS と同じく 0060:xxxx の IRET を指すようにする。
+    // 常駐ドライバには「ベクタのセグメントが 0060h なら未登録」で常駐済みかを見分けるものがある
+    //（Dante98 の MUSIC.COM: INT 48h が 0060h でなければ、INT 0Ah と同じセグメントかで判断する。
+    //  どちらも BIOS の ROM を指していると「常駐済み」と誤解して、解放して終わってしまう）
+    {
+        const uint16_t DOS_IRET = 0x02F0;   // 0060:02F0 = DOSSEG:00F0（国別情報と名前バッファの間の空き）
+        r[lin(0x0060, DOS_IRET)] = 0xCF;
+        uint16_t def_off = rw(m, 0x48 * 4), def_seg = rw(m, 0x48 * 4 + 2);   // INT 48h はどこも使わない＝既定の IRET
+        for (int v = 0x20; v < 0x100; v++) {
+            if (v >= 0xA0 && v <= 0xAF) continue;   // LIO（ROM の中にあるもの）はそのまま
+            if (rw(m, v * 4) == def_off && rw(m, v * 4 + 2) == def_seg) { ww(m, v * 4, DOS_IRET); ww(m, v * 4 + 2, 0x0060); }
+        }
+    }
+
     // PIC の初期マスク（キーボードとスレーブ連結だけ開ける）
     m->pic[0].imr = 0x7D;
     m->pic[1].imr = 0xFF;
@@ -2483,6 +2563,9 @@ void dos_state_save(Machine* m, StateW& w) {
     w.tag("DRV2");   // 2 台目のフロッピー（開いているファイルを開き直す前に入れ直す）
     { char l2 = floppy::drive_letter_unit(1); w.pod(l2); }
     w.str(floppy::current_path_unit(1)); w.str(s_fdcwd2);
+    w.tag("SUBS");   // SUBST のドライブ
+    w.u32((uint32_t)s_subst.size());
+    for (auto& kv : s_subst) { w.pod(kv.first); w.str(kv.second); w.str(s_subst_cwd[kv.first]); }
     if (!s_keytab_init) keytab_default();
     w.tag("KEY1");
     for (int i = 0; i < 20; i++) for (int k = 0; k < 16; k++) w.pod(s_fkey[i][k]);
@@ -2537,6 +2620,16 @@ void dos_state_load(Machine* m, StateR& r) {
         else if (cur != fp) {
             std::string e;
             if (!floppy::insert_unit(1, fp, &e)) plog("[state] 2 台目のフロッピーを入れ直せません: %s (%s)\n", fp.c_str(), e.c_str());
+        }
+    }
+    s_subst.clear(); s_subst_cwd.clear();
+    if (r.peek_tag("SUBS")) {
+        r.tag("SUBS");
+        uint32_t n = r.u32();
+        for (uint32_t i = 0; i < n && i < 26 && r.ok; i++) {
+            char d = 0; r.pod(d);
+            std::string h = r.str(), c = r.str();
+            s_subst[d] = h; s_subst_cwd[d] = c;
         }
     }
     keytab_default();

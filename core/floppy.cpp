@@ -455,7 +455,10 @@ namespace floppy {
 static FloppyImage* s_img = nullptr;
 static char s_letter = 'B';
 static uint32_t s_changes = 0;
-static char s_letter2 = 0;          // 2 台目のドライブの DOS のドライブ名（0 = DOS からは見せない）
+static char s_letter2 = 0;
+// 入れ替えた直後は、SENSE に何回か「準備ができていない（60h）」と答える（実機でディスクを抜いて入れたときと同じ）。
+// インストーラには「ディスクが抜かれた → 入った」を SENSE で待つものがある（ドラゴンナイト4 など）
+static int s_swap_sense[2];          // 2 台目のドライブの DOS のドライブ名（0 = DOS からは見せない）
 static uint32_t s_changes2 = 0;
 static int s_head_pos[4];          // 各ユニットのヘッド位置（シリンダ）
 static bool s_force_wp = false;
@@ -492,10 +495,12 @@ bool insert(const std::string& path0, std::string* err) {
     s_img = im;
     s_folder.clear();
     s_changes++;
+    s_swap_sense[0] = 2;
     fatfs::reset();
     return true;
 }
-void eject() { delete s_img; s_img = nullptr; s_folder.clear(); s_changes++; fatfs::reset(); }
+void eject() { delete s_img; s_img = nullptr; s_folder.clear(); s_changes++; s_swap_sense[0] = 0; fatfs::reset(); }
+void clear_swap_flags() { s_swap_sense[0] = s_swap_sense[1] = 0; }
 FloppyImage* image() { return s_img; }
 
 // ユニット 1（2 台目のドライブ）。ブートモード（DOS を使わず IPL から起動するディスク）で使う。
@@ -513,6 +518,7 @@ bool insert_unit(int unit, const std::string& path, std::string* err) {
     if (s_force_wp) im->wprot = true;
     delete s_img2; s_img2 = im;
     s_changes2++;
+    s_swap_sense[1] = 2;
     fatfs::reset();
     return true;
 }
@@ -660,9 +666,13 @@ static void bios_int1b_body(Machine* m) {
     uint32_t buf = ((uint32_t)c->sr[ES_] << 4) + (uint16_t)c->r[EBP];
     bool mt = (AH() & 0x80) != 0, seek = (AH() & 0x10) != 0, mf = (AH() & 0x40) != 0;
     switch (cmd) {
-    case 0x04:   // SENSE
-        ret(im->wprot ? 0x10 : 0x00);   // bit4: 書き込み禁止
-        return;
+    case 0x04: { // SENSE: bit4 = 書き込み禁止、bit0 = 2HD（1MB の口）、AH=84h なら bit3 = 1MB/640KB 両用ドライブ
+        if (unit < 2 && s_swap_sense[unit] > 0) { s_swap_sense[unit]--; ret(0x60); return; }   // 入れ替えの途中
+        uint8_t st = im->wprot ? 0x10 : 0x00;
+        if (al & 0x80) st |= 0x01;
+        if ((c->r[EAX] & 0x8F40) == 0x8400) st |= 0x08;
+        ret(st);
+        return; }
     case 0x07:   // RECALIBRATE
         s_head_pos[unit] = 0; ret(0x00); return;
     case 0x0A: { // READ ID
