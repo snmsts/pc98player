@@ -11,6 +11,8 @@
 //  画面は 912x528 の固定の大きさで描き、窓の大きさに合わせて拡大する。
 // -----------------------------------------------------------------------------
 
+namespace codeedit { static void append_addr(uint32_t a); }   // codeedit.inc にある
+
 namespace memedit {
 
 static const uint32_t MEM_SIZE = 0xA0000;     // 640KB
@@ -26,7 +28,7 @@ static const int LIST_ROWS = (H - 8 - LIST_Y) / 16;
 // 上の段
 static const int ADDR_X = 52, ADDR_W = 80, GO_X = 138, GO_W = 48, PAUSE_X = 196, HINT_X = 404;
 // コマンド入力
-static const int CMD_X = 60, CMD_Y = 200, CMD_W = 480, CMD_H = 96;
+static const int CMD_X = 40, CMD_Y = 200, CMD_W = 600, CMD_H = 96;
 
 static SDL_Window*   s_win = nullptr;
 static SDL_Renderer* s_ren = nullptr;
@@ -38,6 +40,11 @@ static Uint64 s_next_tick = 0;
 static uint32_t s_top = 0;                     // ダンプの先頭行のアドレス
 static uint32_t s_cur = 0;                     // 選んでいるバイト
 static int s_nib = 0;                          // 0 = 上位 4 ビットを待つ, 1 = 下位
+static uint32_t s_anchor = 0;                  // 範囲指定の起点（s_cur と同じなら範囲なし）
+static bool s_dragging = false;
+static uint32_t sel_lo() { return std::min(s_anchor, s_cur); }
+static uint32_t sel_hi() { return std::max(s_anchor, s_cur); }
+static bool has_range() { return s_anchor != s_cur; }
 static std::vector<uint8_t> s_prev;            // 前回見たときの内容
 static std::vector<uint8_t> s_age;             // 変わってからの残り表示回数（赤く示す時間。約 1 秒）
 static std::vector<uint8_t> s_snap;            // 検索バッファ
@@ -186,7 +193,7 @@ static void ensure_visible() {
 }
 static void go_to(uint32_t a) {
     if (a >= MEM_SIZE) a = MEM_SIZE - 1;
-    s_cur = a; s_nib = 0;
+    s_cur = a; s_anchor = a; s_nib = 0;
     uint32_t row = a / ROW_BYTES * ROW_BYTES;
     s_top = row >= (uint32_t)(ROWS / 2) * ROW_BYTES ? row - (uint32_t)(ROWS / 2) * ROW_BYTES : 0;
     ensure_visible();
@@ -224,14 +231,55 @@ static void address_go() {
 }
 
 // ---- コマンド入力（ダンプで W） ---------------------------------------------
+//  選んでいる番地（範囲指定中はその範囲）に、1 行のコマンドを実行する:
+//    FF442299               16 進のバイト列（2 桁で 1 バイト）を、選んだ番地から順に書き込む
+//    s99 / m999 / l99999999   10 進の値を 1 / 2 / 4 バイト（下位バイトが先）で書き込む
+//  範囲指定中は、どちらの値もその繰り返しで範囲を埋める
 struct CmdResult { bool ok; std::string msg; };
+// 16 進のバイト列（"FF442299" のように 2 桁で 1 バイト。空白は無視）を解く。16 進でなければ false
+static bool parse_hex_bytes(const std::string& in, std::vector<uint8_t>* out, std::string* err) {
+    std::string t;
+    for (char c : in) if (c != ' ' && c != '\t') t += c;
+    out->clear();
+    if (t.empty()) { *err = "値がありません"; return false; }
+    for (char c : t) if (hexd(c) < 0) { *err = "16 進の数字ではありません: " + t; return false; }
+    if (t.size() & 1) { *err = "16 進は 2 桁で 1 バイトです（桁数が奇数）: " + t; return false; }
+    for (size_t i = 0; i < t.size(); i += 2) out->push_back((uint8_t)(hexd(t[i]) << 4 | hexd(t[i + 1])));
+    return true;
+}
+static std::string hex_list(const std::vector<uint8_t>& b, size_t max = 16) {
+    std::string r;
+    for (size_t i = 0; i < b.size() && i < max; i++) { char x[4]; snprintf(x, sizeof(x), "%02X", b[i]); if (i) r += " "; r += x; }
+    if (b.size() > max) r += " …";
+    return r;
+}
+// 範囲 [lo, hi]（両端を含む）を pattern の繰り返しで埋める。最後の 1 回が範囲に入りきらなければ、入るところまで
+static std::string fill_range(uint32_t lo, uint32_t hi, const std::vector<uint8_t>& pat) {
+    uint8_t* m = ram();
+    if (!m || pat.empty()) return "";
+    uint32_t n = hi - lo + 1;
+    for (uint32_t i = 0; i < n; i++) m[lo + i] = pat[i % pat.size()];
+    char b[200];
+    snprintf(b, sizeof(b), "%05X〜%05X（%u バイト）を %s の繰り返しで埋めました%s", lo, hi, n, hex_list(pat, 8).c_str(),
+             (n % pat.size()) ? "（最後の 1 回は入るところまで）" : "");
+    return b;
+}
 static CmdResult run_command(const std::string& line, uint32_t addr) {
     uint8_t* m = ram();
     if (!m) return {false, "メモリがありません"};
     std::string t;
     for (char c : line) if (c != ' ' && c != '\t') t += c;
-    if (t.empty()) return {false, "コマンドを入力してください（例: s99, m999, l99999）"};
+    if (t.empty()) return {false, "コマンドを入力してください（例: FF4422, s99, m999, l99999）"};
     char k = (char)tolower((unsigned char)t[0]);
+    if (has_range()) {   // 範囲指定中: 値（10 進でも 16 進のバイト列でも）の繰り返しで範囲を埋める
+        std::vector<uint8_t> pat; std::string err;
+        if ((k == 's' || k == 'm' || k == 'l') && t.size() >= 2) {
+            uint32_t v; int n;
+            if (!parse_value(t, &v, &n, &err)) return {false, err};
+            for (int i = 0; i < n; i++) pat.push_back((uint8_t)(v >> (8 * i)));
+        } else if (!parse_hex_bytes(t, &pat, &err)) return {false, err};
+        return {true, fill_range(sel_lo(), sel_hi(), pat)};
+    }
     if ((k == 's' || k == 'm' || k == 'l') && t.size() >= 2) {
         uint32_t v; int n; std::string err;
         if (!parse_value(t, &v, &n, &err)) return {false, err};
@@ -242,7 +290,17 @@ static CmdResult run_command(const std::string& line, uint32_t addr) {
         char b[160]; snprintf(b, sizeof(b), "%05X に %u（%0*Xh）を %d バイトで書き込みました: %s", addr, v, n * 2, v, n, bytes.c_str());
         return {true, b};
     }
-    return {false, "知らないコマンドです: " + t + "（今使えるのは s99・m999・l99999 の 10 進書き込み）"};
+    {   // 16 進のバイト列: FF442299 → FF 44 22 99 を選んだ番地から順に書く
+        std::vector<uint8_t> bytes; std::string err;
+        if (parse_hex_bytes(t, &bytes, &err)) {
+            if (addr + bytes.size() > MEM_SIZE) return {false, "640KB の終わりを越えます"};
+            for (size_t i = 0; i < bytes.size(); i++) m[addr + i] = bytes[i];
+            char b[200]; snprintf(b, sizeof(b), "%05X から %u バイト書き込みました: %s", addr, (unsigned)bytes.size(), hex_list(bytes).c_str());
+            return {true, b};
+        }
+        if (t.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos) return {false, err};
+    }
+    return {false, "知らないコマンドです: " + t + "（使えるのは FF4422 のような 16 進のバイト列と、s99・m999・l99999 の 10 進）"};
 }
 static void open_command() {
     s_cmd_open = true;
@@ -262,9 +320,13 @@ static void command_exec() {
 // ---- 描く -----------------------------------------------------------------
 static inline uint32_t C(int r, int g, int b) { return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b; }
 static const uint32_t BG = 0xFF14161Eu;   // RGB(20, 22, 30)
+// 描く先（メモリエディタとコードエディタで同じ道具を使う）
+static uint32_t* cv_px = nullptr;
+static int cv_w = 0, cv_h = 0;
+static void canvas(std::vector<uint32_t>& px, int w, int h) { cv_px = px.data(); cv_w = w; cv_h = h; }
 static void fill(int x, int y, int w, int h, uint32_t c) {
-    for (int yy = std::max(y, 0); yy < std::min(y + h, H); yy++)
-        for (int xx = std::max(x, 0); xx < std::min(x + w, W); xx++) s_px[yy * W + xx] = c;
+    for (int yy = std::max(y, 0); yy < std::min(y + h, cv_h); yy++)
+        for (int xx = std::max(x, 0); xx < std::min(x + w, cv_w); xx++) cv_px[yy * cv_w + xx] = c;
 }
 static void frame(int x, int y, int w, int h, uint32_t c) { fill(x, y, w, 1, c); fill(x, y + h - 1, w, 1, c); fill(x, y, 1, h, c); fill(x + w - 1, y, 1, h, c); }
 static void glyph(int x, int y, const uint8_t* g, int wbytes, uint32_t c) {
@@ -272,7 +334,7 @@ static void glyph(int x, int y, const uint8_t* g, int wbytes, uint32_t c) {
         for (int xx = 0; xx < wbytes * 8; xx++) {
             if (!(g[yy * wbytes + (xx >> 3)] & (0x80 >> (xx & 7)))) continue;
             int px = x + xx, py = y + yy;
-            if (px >= 0 && px < W && py >= 0 && py < H) s_px[py * W + px] = c;
+            if (px >= 0 && px < cv_w && py >= 0 && py < cv_h) cv_px[py * cv_w + px] = c;
         }
 }
 static void ank(int x, int y, uint8_t ch, uint32_t c) { glyph(x, y, font_get_ank(ch), 1, c); }
@@ -290,7 +352,9 @@ static int char_w(const std::string& s, size_t i, size_t* len) {
 static int text_w(const std::string& s) { int w = 0; for (size_t i = 0, n; i < s.size(); i += n) w += char_w(s, i, &n); return w; }
 static void text(int x, int y, uint32_t c, const std::string& utf8, int center_w = 0) {
     if (center_w > 0) x += (center_w - text_w(utf8)) / 2;
-    std::string sj = hostfs::to_sjis(utf8);
+    std::string u = utf8;   // 「〜」(U+301C) は CP932 に無いので「～」(U+FF5E) にする（どちらも 8160h）
+    for (size_t p; (p = u.find("\xE3\x80\x9C")) != std::string::npos;) u.replace(p, 3, "\xEF\xBD\x9E");
+    std::string sj = hostfs::to_sjis(u);
     for (size_t i = 0; i < sj.size(); i++) {
         uint8_t b = (uint8_t)sj[i];
         if (sjis_lead(b) && i + 1 < sj.size()) {
@@ -344,6 +408,7 @@ static void age_bytes() {   // 変わったバイトを数回ぶん赤く残す
     }
 }
 static void draw() {
+    canvas(s_px, W, H);
     std::fill(s_px.begin(), s_px.end(), C(236, 237, 242));
     uint8_t* m = ram();
     // 上の段
@@ -351,7 +416,7 @@ static void draw() {
     field(ADDR_X, 6, ADDR_W, s_addr, s_focus == F_ADDR);
     button(GO_X, 6, GO_W, 20, "移動");
     checkbox(PAUSE_X, 8, s_pause, "操作中はゲームを止める");
-    text(HINT_X, 8, C(80, 85, 100), "0-9 A-F:書き換え　W:コマンド");
+    text(HINT_X, 8, C(80, 85, 100), "0-9 A-F:書き換え　ドラッグ:範囲　W:コマンド");
     // ダンプ
     int dw = SB_X + SB_W - DX + 2;
     fill(DX - 2, DY - 2, dw, (ROWS + 1) * 16 + 4, BG);
@@ -374,6 +439,8 @@ static void draw() {
             uint32_t fg = changed ? C(255, 90, 90) : C(225, 228, 235), bk = BG;
             if (s_use_blocks && !changed && !in_blocks(a)) fg = C(95, 98, 110);   // サーチの対象外（ゲーム以外）は暗く
             if (is_cand(a)) bk = C(70, 60, 20);
+            bool insel = has_range() && a >= sel_lo() && a <= sel_hi();
+            if (insel) { bk = C(45, 75, 130); if (!changed) fg = C(255, 255, 255); }   // 範囲指定
             if (a == s_cur) { bk = C(80, 150, 255); fg = C(255, 255, 255); }
             int hx = DX + (9 + i * 3) * 8;
             fill(hx, y, 16, 16, bk);
@@ -382,7 +449,7 @@ static void draw() {
             if (a == s_cur && s_nib == 1) fill(hx + 8, y + 14, 8, 2, C(255, 230, 120));   // 下位の 4 ビットを待っている印
             // 文字（ASCII と半角カナは PC-98 の字そのまま）
             int cx = DX + (9 + ROW_BYTES * 3 + 1 + i) * 8;
-            if (a == s_cur) fill(cx, y, 8, 16, C(80, 150, 255));
+            if (a == s_cur || insel) fill(cx, y, 8, 16, a == s_cur ? C(80, 150, 255) : C(45, 75, 130));
             ank(cx, y, (v >= 0x20 && v < 0x7F) || (v >= 0xA1 && v <= 0xDF) ? v : '.', changed ? C(255, 90, 90) : C(150, 155, 170));
         }
     }
@@ -428,9 +495,11 @@ static void draw() {
     if (s_cmd_open) {
         fill(CMD_X, CMD_Y, CMD_W, CMD_H, C(236, 237, 242));
         frame(CMD_X, CMD_Y, CMD_W, CMD_H, C(60, 120, 230));
-        char t[64]; snprintf(t, sizeof(t), "コマンド入力 - 番地 %05X", s_cur);
+        char t[160];
+        if (has_range()) snprintf(t, sizeof(t), "コマンド入力 - 範囲 %05X〜%05X（%u バイト）に繰り返し書き込み", sel_lo(), sel_hi(), sel_hi() - sel_lo() + 1);
+        else snprintf(t, sizeof(t), "コマンド入力 - 番地 %05X", s_cur);
         text(CMD_X + 8, CMD_Y + 6, C(30, 60, 140), t);
-        text(CMD_X + 8, CMD_Y + 24, C(30, 30, 40), "10 進で書き込む: s99 = 1 バイト、m999 = 2、l99999 = 4");
+        text(CMD_X + 8, CMD_Y + 24, C(30, 30, 40), "FF4422… = 16 進のバイト列　s99 / m999 / l99999 = 10 進（1/2/4 バイト）");
         field(CMD_X + 8, CMD_Y + 44, CMD_W - 16, s_cmd, true);
         text_wrap(CMD_X + 8, CMD_Y + 68, CMD_W - 16, 1, C(160, 40, 40), s_cmd_msg);
     }
@@ -506,8 +575,31 @@ static void dump_char(char c) {
     uint8_t v = m[s_cur];
     v = s_nib == 0 ? (uint8_t)((v & 0x0F) | (d << 4)) : (uint8_t)((v & 0xF0) | d);
     m[s_cur] = v;                 // その場で書き換える
+    s_anchor = s_cur;             // 1 バイトずつの書き換えは範囲を解く
     if (s_nib == 0) s_nib = 1;
-    else { s_nib = 0; if (s_cur + 1 < MEM_SIZE) s_cur++; ensure_visible(); }
+    else { s_nib = 0; if (s_cur + 1 < MEM_SIZE) s_cur++; s_anchor = s_cur; ensure_visible(); }
+}
+static void range_status() {
+    if (!has_range()) return;
+    char b[96]; snprintf(b, sizeof(b), "範囲 %05X〜%05X（%u バイト）: W で範囲に書き込み", sel_lo(), sel_hi(), sel_hi() - sel_lo() + 1);
+    set_status(b);
+}
+// ダンプの上の位置 → 番地。drag（範囲指定の途中）なら外にはみ出しても端の番地にし、上下は 1 行ずつ送る
+static bool dump_addr_at(float x, float y, bool drag, uint32_t* out) {
+    int cx = (int)SDL_floorf((x - DX) / 8), r = (int)SDL_floorf((y - DY - 16) / 16);
+    if (drag) {
+        if (r < 0) { if (s_top >= ROW_BYTES) s_top -= ROW_BYTES; r = 0; }
+        if (r >= ROWS) { if (s_top + (uint32_t)ROWS * ROW_BYTES < MEM_SIZE) s_top += ROW_BYTES; r = ROWS - 1; }
+        if (cx < 9) cx = 9;
+    } else if (r < 0 || r >= ROWS) return false;
+    int col = -1;
+    if (cx >= 9 && cx < 9 + ROW_BYTES * 3) col = (cx - 9) / 3;
+    else if (cx >= 9 + ROW_BYTES * 3 + 1 && cx < 9 + ROW_BYTES * 4 + 1) col = cx - (9 + ROW_BYTES * 3 + 1);
+    else if (drag) col = cx < 9 + ROW_BYTES * 3 ? 0 : ROW_BYTES - 1;
+    if (col < 0) return false;
+    uint32_t a = s_top + (uint32_t)r * ROW_BYTES + (uint32_t)col;
+    *out = a >= MEM_SIZE ? MEM_SIZE - 1 : a;
+    return true;
 }
 // 打ったキーの文字（表示できる ASCII だけ。キー配列と Shift に従う）。無ければ 0
 //  文字入力（SDL の TEXT_INPUT）は IME を通り、英字が IME に取られるので使わない
@@ -558,9 +650,11 @@ static void on_key(const SDL_KeyboardEvent& k) {
     if (c < 0) c = 0;
     if (c >= (int64_t)MEM_SIZE) c = MEM_SIZE - 1;
     s_cur = (uint32_t)c; s_nib = 0;
+    if (!(k.mod & SDL_KMOD_SHIFT)) s_anchor = s_cur;   // Shift+カーソルキーで範囲を広げる
     ensure_visible();
+    range_status();
 }
-static void on_click(float x, float y) {
+static void on_click(float x, float y, int clicks, bool shift) {
     if (s_cmd_open) { if (!in(x, y, CMD_X, CMD_Y, CMD_W, CMD_H)) close_command(); return; }
     if (in(x, y, ADDR_X, 6, ADDR_W, 20)) { s_focus = F_ADDR; s_addr.selall = true; return; }
     if (in(x, y, GO_X, 6, GO_W, 20)) { address_go(); return; }
@@ -576,7 +670,10 @@ static void on_click(float x, float y) {
     }
     if (in(x, y, PX, LIST_Y, PW, LIST_ROWS * 16 + 4)) {
         size_t k = (size_t)s_list_top + (size_t)((y - LIST_Y - 2) / 16);
-        if (k < s_cand.size()) { s_list_sel = (int)k; go_to(s_cand[k]); s_focus = F_DUMP; }   // そのまま 16 進を打てば書き換えられる
+        if (k < s_cand.size()) {
+            s_list_sel = (int)k; go_to(s_cand[k]); s_focus = F_DUMP;   // そのまま 16 進を打てば書き換えられる
+            if (clicks == 2) codeedit::append_addr(s_cand[k]);         // ダブルクリック: コードエディタの末尾に「番地 」
+        }
         return;
     }
     if (in(x, y, SB_X, DY + 16, SB_W, ROWS * 16)) {   // スクロールバー: その位置へ
@@ -587,13 +684,23 @@ static void on_click(float x, float y) {
     }
     if (in(x, y, DX, DY + 16, SB_X - DX, ROWS * 16)) {
         s_focus = F_DUMP;
-        int cx = (int)(x - DX) / 8, r = (int)(y - DY - 16) / 16;
-        int col = -1;
-        if (cx >= 9 && cx < 9 + ROW_BYTES * 3) col = (cx - 9) / 3;
-        else if (cx >= 9 + ROW_BYTES * 3 + 1 && cx < 9 + ROW_BYTES * 4 + 1) col = cx - (9 + ROW_BYTES * 3 + 1);
-        if (col >= 0) { s_cur = s_top + (uint32_t)r * ROW_BYTES + (uint32_t)col; if (s_cur >= MEM_SIZE) s_cur = MEM_SIZE - 1; s_nib = 0; }
+        uint32_t a;
+        if (dump_addr_at(x, y, false, &a)) {
+            // クリック = 選び直し（Shift を押しながらなら範囲を広げる）。押したまま動かすと範囲指定
+            s_cur = a; s_nib = 0;
+            if (!shift) s_anchor = a;
+            s_dragging = true;
+            SDL_CaptureMouse(true);
+            range_status();
+        }
         return;
     }
+}
+static void on_drag(float x, float y) {
+    uint32_t a;
+    if (!dump_addr_at(x, y, true, &a)) return;
+    s_cur = a; s_nib = 0;
+    range_status();
 }
 static void on_event(SDL_Event& e) {
     switch (e.type) {
@@ -602,8 +709,18 @@ static void on_event(SDL_Event& e) {
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
         if (e.button.button != SDL_BUTTON_LEFT) return;
         SDL_ConvertEventToRenderCoordinates(s_ren, &e);
-        on_click(e.button.x, e.button.y);
+        on_click(e.button.x, e.button.y, e.button.clicks, (SDL_GetModState() & SDL_KMOD_SHIFT) != 0);
         break;
+    case SDL_EVENT_MOUSE_MOTION:
+        if (!s_dragging) return;
+        SDL_ConvertEventToRenderCoordinates(s_ren, &e);
+        on_drag(e.motion.x, e.motion.y);
+        break;
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+        if (e.button.button != SDL_BUTTON_LEFT || !s_dragging) return;
+        s_dragging = false;
+        SDL_CaptureMouse(false);
+        return;
     case SDL_EVENT_MOUSE_WHEEL: {
         float mx = e.wheel.mouse_x, my = e.wheel.mouse_y;
         SDL_RenderCoordinatesFromWindow(s_ren, mx, my, &mx, &my);

@@ -55,6 +55,8 @@ static bool          g_memedit_paused = false;     // メモリエディタの�
 static bool          g_pause_inactive = false;
 static bool          g_middle_release = true;
 static bool          g_mouse_lock_disable = false;
+static bool          g_mouse_shared = false;   // MouseLockDisable=2: 捕まえずに、カーソルが画面の上にある間だけゲームへ送る
+static bool          g_shared_in = false;      // 共有モード: カーソルが画面の上にあるか
 static int           g_audio_frames = 4;
 static Uint32        g_ev_dialog = 0;       // ファイル選択の結果（別スレッドから届く）
 
@@ -250,20 +252,27 @@ static void ov_text(int x, int y, uint32_t c, const std::string& utf8, int cente
 static void update_title() {
     std::string t = g_title + "  [F11: ロード / Shift+F11: セーブ]";
     if (g_mouse_lock_disable) {}
+    else if (g_mouse_shared) t += "  [マウス: 画面の上で動かす]";
     else if (g_captured) t += "  [マウス使用中: F12 で解放]";
     else t += "  [クリックでマウスを使う]";
     if (g_turbo) t += "  [早送り]";
-    if (g_memedit_paused) t += "  [一時停止中: メモリエディタ]";
+    if (g_memedit_paused) t += "  [一時停止中: エディタ操作中]";
     SDL_SetWindowTitle(g_win, t.c_str());
 }
 static void set_capture(bool on) {
-    if (on && g_mouse_lock_disable) return;
+    if (on && (g_mouse_lock_disable || g_mouse_shared)) return;   // MouseLockDisable=1/2: クリックしても F12 でも捕まえない
     if (on == g_captured) return;
     g_captured = on;
     SDL_SetWindowRelativeMouseMode(g_win, on);
     g_mouse_ax = g_mouse_ay = 0;
     if (!on) { g_mouse_btn = 0; if (g_p) machine_mouse(g_p->m, 0, 0, 0); }
     update_title();
+}
+// 共有モード: カーソルが画面の外へ出た（押していたボタンも離す）
+static void shared_out() {
+    if (g_shared_in) { g_mouse_btn = 0; if (g_p) machine_mouse(g_p->m, 0, 0, 0); }
+    g_shared_in = false;
+    g_mouse_ax = g_mouse_ay = 0;
 }
 static void release_keys() {
     if (g_p) for (int k = 0; k < 128; k++) if (g_p->m->kb_down[k]) machine_key(g_p->m, (uint8_t)k, false);
@@ -285,17 +294,17 @@ static Uint64      g_toast_until = 0;
 static const int MENU_COLS = 4, CELL_W = 150, CELL_H = 132, GRID_X = 20, GRID_Y = 42;
 // 下の段: 1 行目 = フロッピーの名前（右端に前／次のディスク）、2 行目 = ボタン（左がフロッピー、右が「その他」）
 static const int FD_Y1 = 306, FD_Y = 330, FD_H = 20;
-static const int FD_INS_X = 20, FD_INS_W = 120, FD_EJ_X = 146, FD_EJ_W = 90, FD_UNIT_X = 242, FD_UNIT_W = 96;
-static const int OT_MEM_X = 360, OT_MEM_W = 136, OT_REBOOT_X = 502, OT_REBOOT_W = 118;
+static const int FD_INS_X = 20, FD_INS_W = 112, FD_EJ_X = 138, FD_EJ_W = 88, FD_UNIT_X = 232, FD_UNIT_W = 88;
+static const int OT_MEM_X = 326, OT_MEM_W = 104, OT_CODE_X = 436, OT_CODE_W = 104, OT_REBOOT_X = 546, OT_REBOOT_W = 74;
 static const int FD_PREV_X = 512, FD_PREV_W = 52, FD_NEXT_X = 568, FD_NEXT_W = 52;
-enum { HIT_FD_INSERT = -2, HIT_FD_EJECT = -3, HIT_FD_NEXT = -4, HIT_FD_PREV = -5, HIT_REBOOT = -6, HIT_MEMEDIT = -7, HIT_FD_UNIT = -8 };
+enum { HIT_FD_INSERT = -2, HIT_FD_EJECT = -3, HIT_FD_NEXT = -4, HIT_FD_PREV = -5, HIT_REBOOT = -6, HIT_MEMEDIT = -7, HIT_FD_UNIT = -8, HIT_CODEEDIT = -9 };
 
 // フロッピーの小メニュー（win32 版のポップアップメニューの代わり）
 struct FdItem { std::string label; int id; bool enabled; std::string spec; };
 static std::vector<FdItem> g_fd_items;
 static int  g_fd_sel = -1;           // -1 = 閉じている
 static const int FDM_X = 20, FDM_W = 400, FDM_IH = 18;
-enum { FD_PICK = 1, FD_GW = 2, FD_REREAD = 3, FD_SAVE = 4, FD_FOLDER = 5, FD_DEV = 100, FD_LIST = 200 };
+enum { FD_PICK = 1, FD_GW = 2, FD_REREAD = 3, FD_SAVE = 4, FD_FOLDER = 5, FD_WPROT = 6, FD_DEV = 100, FD_LIST = 200 };
 enum { DLG_INSERT = 1, DLG_SAVE_D88 = 2, DLG_FOLDER = 3, DLG_FD_FOLDER = 4 };
 
 static void show_toast(const std::string& t) { g_toast = t; g_toast_until = SDL_GetTicks() + 2500; }
@@ -426,6 +435,7 @@ static void fd_menu_open() {
     if (!has_gw) g_fd_items.push_back({"Greaseweazle を探してつなぐ", FD_GW, true, "GW"});
     FloppyImage* im = fd_img();
     g_fd_items.push_back({"読み直す（実機のディスクを入れ替えた）", FD_REREAD, im && im->src, ""});
+    g_fd_items.push_back({std::string(im && im->wprot ? "＊" : "　") + "書き込み禁止（ライトプロテクト）", FD_WPROT, im != nullptr, ""});
     g_fd_items.push_back({"今のディスクを D88 で保存…", FD_SAVE, im != nullptr, ""});
     g_fd_sel = 0;
 }
@@ -449,6 +459,14 @@ static void fd_menu_decide(int i) {
     case FD_REREAD:
         floppy::media_changed();
         show_toast("ディスクを読み直しました"); menu_close();
+        break;
+    case FD_WPROT:   // 書き込み禁止のつまみ（実機のドライブで書けないものは解除できない）
+        if (FloppyImage* im = fd_img()) {
+            if (im->wprot && im->src && !im->src->writable()) { g_menu_note = "このドライブには書き込めません"; break; }
+            im->wprot = !im->wprot;
+            show_toast(fd_label() + (im->wprot ? " を書き込み禁止にしました" : " の書き込み禁止を解除しました"));
+            menu_close();
+        }
         break;
     case FD_GW: case FD_DEV:
         fd_insert(it.spec);
@@ -484,6 +502,7 @@ static void menu_decide() {
 }
 
 #include "memedit.inc"
+#include "codeedit.inc"
 #include "gamepad.inc"
 
 // 「その他」: プログラム再起動（PC-98 の電源を入れ直す。INI も読み直す）
@@ -504,6 +523,7 @@ static void menu_reboot() {
     if (!ok) { g_menu_note = "起動し直せませんでした: " + err; return; }
     if (reloaded) apply_live_settings(old_ps);
     memedit::on_reboot();
+    codeedit::on_reboot();
     menu_close();
     if (!g_p->floppy_error.empty()) show_toast(g_p->floppy_error);
     else if (!rerr.empty()) show_toast(rerr);
@@ -522,6 +542,7 @@ static int menu_hit(float lx, float ly) {
         if (lx >= FD_EJ_X && lx < FD_EJ_X + FD_EJ_W) return HIT_FD_EJECT;
         if (fd_two() && lx >= FD_UNIT_X && lx < FD_UNIT_X + FD_UNIT_W) return HIT_FD_UNIT;
         if (lx >= OT_MEM_X && lx < OT_MEM_X + OT_MEM_W) return HIT_MEMEDIT;
+        if (lx >= OT_CODE_X && lx < OT_CODE_X + OT_CODE_W) return HIT_CODEEDIT;
         if (lx >= OT_REBOOT_X && lx < OT_REBOOT_X + OT_REBOOT_W) return HIT_REBOOT;
     }
     if (g_disk_list.size() > 1 && ly >= FD_Y1 && ly < FD_Y1 + FD_H) {
@@ -598,7 +619,8 @@ static void draw_menu() {
         button(FD_INS_X, FD_Y, FD_INS_W, "F:入れる/実機");
         button(FD_EJ_X, FD_Y, FD_EJ_W, "E:取り出す");
         if (fd_two()) button(FD_UNIT_X, FD_Y, FD_UNIT_W, "D:ドライブ");
-        button(OT_MEM_X, FD_Y, OT_MEM_W, "M:メモリエディタ");
+        button(OT_MEM_X, FD_Y, OT_MEM_W, "M:メモリ編集");
+        button(OT_CODE_X, FD_Y, OT_CODE_W, "C:コード編集");
         button(OT_REBOOT_X, FD_Y, OT_REBOOT_W, "R:再起動");
     }
     if (!g_menu_note.empty()) ov_text(0, 356, RGBA(255, 120, 120), ov_fit(g_menu_note, 636), 640);
@@ -664,6 +686,7 @@ static void on_menu_key(SDL_Scancode sc, bool first) {
     case SDL_SCANCODE_D: if (first) fd_toggle_unit(); return;
     case SDL_SCANCODE_R: if (first) menu_reboot(); return;
     case SDL_SCANCODE_M: if (first) { menu_close(); memedit::show(); } return;
+    case SDL_SCANCODE_C: if (first) { menu_close(); codeedit::show(); } return;
     default: return;
     }
     g_menu_note.clear();
@@ -671,6 +694,7 @@ static void on_menu_key(SDL_Scancode sc, bool first) {
 
 static void on_event(SDL_Event& e, bool& running) {
     if (memedit::owns(e)) { memedit::on_event(e); return; }   // メモリエディタの窓あての入力
+    if (codeedit::owns(e)) { codeedit::on_event(e); return; }   // コードエディタの窓あての入力
     if (e.type == g_ev_dialog) {
         std::string* path = (std::string*)e.user.data1;
         if (!path) return;
@@ -687,7 +711,9 @@ static void on_event(SDL_Event& e, bool& running) {
         if (e.drop.data && is_floppy_image(e.drop.data)) fd_insert(e.drop.data);
         else if (e.drop.data) show_toast("フロッピーイメージではありません");
         break;
+    case SDL_EVENT_WINDOW_MOUSE_LEAVE: if (g_mouse_shared && !g_mouse_btn) shared_out(); break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
+        if (g_mouse_shared) { g_mouse_btn = 0; shared_out(); SDL_CaptureMouse(false); }
         set_capture(false);
         release_keys();   // 離した瞬間に押しっぱなしのキーが残らないように
         if (g_pause_inactive) g_paused_by_focus = true;
@@ -709,6 +735,16 @@ static void on_event(SDL_Event& e, bool& running) {
         if (k >= 0 && g_p && (!e.key.repeat || g_p->ps.cfg.key_repeat)) machine_key(g_p->m, (uint8_t)k, down);
         break; }
     case SDL_EVENT_MOUSE_MOTION:
+        if (g_mouse_shared && g_menu == MENU_NONE) {
+            // 共有モード: カーソルが画面（640x400）の上にある間だけ、その動きを PC-98 のドット数に直して送る
+            SDL_ConvertEventToRenderCoordinates(g_ren, &e);
+            bool in = e.motion.x >= 0 && e.motion.x < 640 && e.motion.y >= 0 && e.motion.y < 400;
+            if (in || g_mouse_btn) {
+                if (g_shared_in) { g_mouse_ax += e.motion.xrel * g_mouse_speed / 100.0f; g_mouse_ay += e.motion.yrel * g_mouse_speed / 100.0f; }
+                g_shared_in = true;
+            } else shared_out();
+            break;
+        }
         if (g_captured) {
             g_mouse_ax += e.motion.xrel * g_mouse_speed / 100.0f;
             g_mouse_ay += e.motion.yrel * g_mouse_speed / 100.0f;
@@ -740,9 +776,18 @@ static void on_event(SDL_Event& e, bool& running) {
             else if (h == HIT_FD_UNIT) fd_toggle_unit();
             else if (h == HIT_REBOOT) menu_reboot();
             else if (h == HIT_MEMEDIT) { menu_close(); memedit::show(); }
+            else if (h == HIT_CODEEDIT) { menu_close(); codeedit::show(); }
             break;
         }
         if (e.button.button == SDL_BUTTON_MIDDLE) { if (down && g_middle_release) set_capture(false); break; }
+        if (g_mouse_shared) {   // 共有モード: 画面の上で押したら送る。押している間は窓の外で離しても届くように捕まえる
+            SDL_ConvertEventToRenderCoordinates(g_ren, &e);
+            bool in = e.button.x >= 0 && e.button.x < 640 && e.button.y >= 0 && e.button.y < 400;
+            if (down && in) { g_mouse_btn |= bit; g_shared_in = true; }
+            else if (!down) g_mouse_btn &= ~bit;
+            SDL_CaptureMouse(g_mouse_btn != 0);
+            break;
+        }
         if (!g_captured) { if (down && bit == 1 && g_p) set_capture(true); break; }
         if (down) g_mouse_btn |= bit; else g_mouse_btn &= ~bit;
         break; }
@@ -838,7 +883,9 @@ static void write_template_ini(const std::string& path, const std::string& start
       << "; ゲームが終わったら窓を閉じる" << nl << "ExitOnEnd=1" << nl
       << "; 非アクティブ時に一時停止" << nl << "PauseInactive=0" << nl
       << "; マウスの中ボタン（ホイール）クリックでマウスを放す（0 で無効。F12 は常に有効）" << nl << "MiddleRelease=1" << nl
-      << "; 1 にするとマウスを一切捕まえない（マウスを使わないソフト向け）" << nl << "MouseLockDisable=0" << nl
+      << "; 1 にするとマウスを一切捕まえない（マウスを使わないソフト向け）" << nl
+      << "; 2 にすると捕まえずに、カーソルがゲームの画面の上にある間だけマウスを送る（メモリエディタなど、ほかの窓と行き来するとき向け）" << nl
+      << "MouseLockDisable=0" << nl
       << "; ゲームパッド: 音源ボードのジョイスティック端子（ATARI 仕様: 上下左右＋トリガ A・B）にあてる。0 で使わない" << nl << "Joystick=1" << nl
       << "; 方向の行き先: JOY（ジョイスティック）/ CURSOR（カーソルキー）/ TENKEY（テンキー）。JOY+CURSOR のように重ねられる" << nl
       << "JoyDirection=JOY" << nl
@@ -1114,6 +1161,7 @@ static fs::path    g_base_dir;       // Root= を当てる前のゲームのフ�
 static std::string g_ini_floppy;     // INI の FloppyDisk= / FloppyImage=（読み直しで変わったときだけ入れ替える）
 static std::string g_ini_floppy2;    // 同じく FloppyDisk2=
 static bool        g_ini_memedit = false;   // MemoryEditor=1
+static bool        g_ini_codeedit = false;  // CodeEditor=1
 
 static void apply_boot_override(PlayerSettings* ps) {
     if (!g_boot_override.on) return;
@@ -1142,10 +1190,17 @@ static std::string apply_host_settings(const Ini& ini) {
     g_mouse_speed = ini.geti("PC98PLAYER.MOUSESPEED", 100);
     g_pause_inactive = ini.geti("PC98PLAYER.PAUSEINACTIVE", 0) != 0;
     g_middle_release = ini.geti("PC98PLAYER.MIDDLERELEASE", 1) != 0;
-    g_mouse_lock_disable = ini.geti("PC98PLAYER.MOUSELOCKDISABLE", 0) != 0;
-    if (g_mouse_lock_disable && g_captured) set_capture(false);
+    {
+        int md = ini.geti("PC98PLAYER.MOUSELOCKDISABLE", 0);
+        g_mouse_lock_disable = md == 1;   // 1: マウスを使わない
+        g_mouse_shared = md == 2;         // 2: 捕まえずに、画面の上にある間だけ送る
+        g_shared_in = false;
+    }
+    if ((g_mouse_lock_disable || g_mouse_shared) && g_captured) set_capture(false);
+    if (g_win) update_title();
     g_audio_frames = std::max(1, std::min(30, ini.geti("PC98PLAYER.AUDIOFRAMES", 4)));
     g_ini_memedit = ini.geti("PC98PLAYER.MEMORYEDITOR", 0) != 0;
+    g_ini_codeedit = ini.geti("PC98PLAYER.CODEEDITOR", 0) != 0;
     pad::s_notice = show_toast;
     std::string bad;
     pad::configure(ini, g_p ? g_p->m : nullptr, &bad);
@@ -1195,6 +1250,7 @@ static void apply_live_settings(const PlayerSettings& o) {
     else if (n.scale != o.scale && !full) SDL_SetWindowSize(g_win, 640 * n.scale, 400 * n.scale);
     SDL_SetTextureScaleMode(g_tex, n.smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
     if (g_ini_memedit && !memedit::visible()) { memedit::show(); SDL_RaiseWindow(g_win); }
+    if (g_ini_codeedit && !codeedit::visible()) { codeedit::show(); SDL_RaiseWindow(g_win); }
 }
 // ブートモードなど: 入れ替えの一覧 = ゲームのフォルダにあるフロッピーイメージ（名前順）と、いま入っているもの
 static void build_disk_list() {
@@ -1288,6 +1344,15 @@ int main(int argc, char** argv) {
         memedit::place_beside(x + w, y);
         SDL_RaiseWindow(g_win);   // キー入力はゲームの窓へ
     }
+    if (g_ini_codeedit) {   // コードエディタを別の窓で開く（本体の窓の下に並べる）
+        codeedit::show();
+        int x = 0, y = 0, w = 0, h = 0, top = 0;
+        SDL_GetWindowPosition(g_win, &x, &y);
+        SDL_GetWindowSize(g_win, &w, &h);
+        SDL_GetWindowBordersSize(g_win, &top, nullptr, nullptr, nullptr);
+        codeedit::place_at(x, y + h + top);
+        SDL_RaiseWindow(g_win);
+    }
     if (getenv("PC98PLAYER_SHOW_RENDERER")) { g_title += std::string(" [") + SDL_GetRendererName(g_ren) + "]"; update_title(); }
 
     const double frame_sec = (double)FRAME_TICKS / MASTER_CLOCK;
@@ -1301,9 +1366,10 @@ int main(int argc, char** argv) {
         if (!running) break;
         double t = now();
         memedit::tick();
+        codeedit::refresh();
         if (g_paused_by_focus) { SDL_WaitEventTimeout(nullptr, 20); next = t; continue; }
         {   // メモリエディタを操作している間は止める（チェックが入っているとき）
-            bool mp = memedit::pause_requested();
+            bool mp = memedit::pause_requested() || codeedit::pause_requested();
             if (mp != g_memedit_paused) { g_memedit_paused = mp; update_title(); }
             if (mp) {
                 if (g_audio && SDL_GetAudioStreamQueued(g_audio) > 0) audio_flush();
@@ -1326,7 +1392,7 @@ int main(int argc, char** argv) {
             else SDL_DelayPrecise((Uint64)(wait * 1e9));
             continue;
         }
-        if (g_captured) {
+        if (g_captured || (g_mouse_shared && g_shared_in)) {
             int dx = (int)g_mouse_ax, dy = (int)g_mouse_ay;
             g_mouse_ax -= dx; g_mouse_ay -= dy;
             machine_mouse(g_p->m, dx, dy, g_mouse_btn);
@@ -1338,11 +1404,13 @@ int main(int argc, char** argv) {
             double t0 = now();
             for (int i = 0; i < 64; i++) {
                 bool last = now() - t0 >= 1.0 / 60 || i == 63;
+                codeedit::tick();   // 書き込み続けるコード（%）
                 g_p->run_frame(last, false);
                 if (last || g_p->m->quit) break;
             }
             if (g_audio && SDL_GetAudioStreamQueued(g_audio) > 0) audio_flush();
         } else {
+            codeedit::tick();   // 書き込み続けるコード（%）
             g_p->run_frame(true);
             audio_push_frame();
         }
