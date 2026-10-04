@@ -253,6 +253,7 @@ Start=A:\AUTOEXEC.BAT</pre>
 <h2 id="ini">1-8. 設定（PC98PLAYER.INI）</h2>
 <p>ゲームのフォルダの <code>PC98PLAYER.INI</code> をメモ帳などで編集します。文字コードは Shift_JIS・UTF-8 のどちらでも構いません。
 <code>;</code> から行末まではコメントです。書かなかった項目は既定値になります。</p>
+<div class="note"><strong>設定INI作成.html:</strong> 同梱の <code>設定INI作成.html</code> をブラウザで開くと、項目を選ぶだけで INI ができあがり、［ダウンロード］で <code>PC98PLAYER.INI</code> として保存できます（ネットにはつながりません）。最初に実行するプログラムやフロッピーイメージはファイル選択・ドラッグ＆ドロップで入れられ、今ある INI を読み込んで直すこともできます。</div>
 <p id="reload"><strong>INI の読み直し:</strong> 動かしたまま INI を書き換えて保存し、<kbd>F11</kbd> の画面の「R: プログラム再起動」を実行すると、INI を読み直してから PC-98 を起動し直します。
 設定を変えては試す、を EXE を立ち上げ直さずに繰り返せます。</p>
 <ul>
@@ -303,6 +304,7 @@ Start=A:\AUTOEXEC.BAT</pre>
   <tr><td><code>FullScreen=</code></td><td>0</td><td>1 で起動時から全画面。</td></tr>
   <tr><td><code>Smooth=</code></td><td>0</td><td>1 で拡大時になめらかにする（0 はドットのまま）。</td></tr>
   <tr><td><code>Font=</code></td><td>ＭＳ ゴシック</td><td>漢字の字形を作るもとにする Windows のフォント。</td></tr>
+  <tr><td><code>FontShift=</code></td><td>1</td><td>半角文字が左端の列まで使っていたら 1 ドット右へ寄せ、実機の ROM と同じく左端を空ける。0 で Windows のフォントのまま（MIMPI V4 の曲名のように、半角を太字にして描くソフトで線が点線のように崩れるのを防ぐ）。</td></tr>
   <tr><td><code>KanjiJIS=</code></td><td>78</td><td>78: PC-98 と同じ旧 JIS の字の並び。83: 新 JIS の並び。</td></tr>
 </table>
 </div>
@@ -342,6 +344,7 @@ Start=A:\AUTOEXEC.BAT</pre>
 <table>
   <tr><th>項目</th><th>既定値</th><th>説明</th></tr>
   <tr><td><code>SoundBoard=</code></td><td>86</td><td>86: PC-9801-86 相当（FM 6 音＋SSG＋リズム＋PCM）。26: PC-9801-26K 相当（FM 3 音＋SSG）。0: 音源なし。</td></tr>
+  <tr><td><code>SoundBIOS=</code></td><td>0</td><td>1 で音源ボードの ROM（サウンド BIOS、CC00h・INT D2h）を載せる。MIDI プレーヤーの MIMPI などが FM 音源で演奏するのに使う。音色は PC98PLAYER が用意したもので、実機の ROM とは違う。</td></tr>
   <tr><td><code>SoundIRQ=</code></td><td>12</td><td>音源ボードの割込み（3 / 10 / 12 / 13）。</td></tr>
   <tr><td><code>Sound=</code></td><td>1</td><td>0 で FM 音源の音を出さない（ボード自体はある扱い）。</td></tr>
   <tr><td><code>Volume=</code></td><td>100</td><td>全体の音量（%、0〜1000）。100 を超えて上げると、大きな山は自動で丸めて音割れを抑えます。</td></tr>
@@ -350,7 +353,7 @@ Start=A:\AUTOEXEC.BAT</pre>
   <tr><td><code>BeepVolume=</code></td><td>50</td><td>ビープ音の音量（%）。</td></tr>
   <tr><td><code>RhythmROM=</code></td><td>なし</td><td>リズム音源のサンプル（2608_RYM.WAV など）。無くても内蔵の合成音で鳴ります。</td></tr>
   <tr><td><code>SampleRate=</code></td><td>44100</td><td>出力のサンプリング周波数。</td></tr>
-  <tr><td><code>MIDI=</code></td><td>0</td><td>1 で MIDI 音源（MPU-PC98II 相当）を載せ、Windows の MIDI 出力へ送る。</td></tr>
+  <tr><td><code>MIDI=</code></td><td>0</td><td>1 で MIDI 音源（MPU-PC98II 相当）を載せ、Windows の MIDI 出力へ送る。RS-232C に MIDI インターフェースをつなぐ設定のゲームも、RS-232C に送ったバイトを同じ MIDI 出力へ送る。</td></tr>
   <tr><td><code>MidiDevice=</code></td><td>-1</td><td>MIDI の出力先の番号（-1 は Windows の既定）。</td></tr>
   <tr><td><code>MidiIRQ=</code></td><td>6</td><td>MIDI ボードの割込み。</td></tr>
   <tr><td><code>MidiSpeedFix=</code></td><td>100</td><td>MIDI の演奏速度（%、10〜1000）。「MIDI のときだけ曲が遅い」ソフトで 120〜150 などに。</td></tr>

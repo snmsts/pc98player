@@ -204,6 +204,7 @@ static void cb_kanji(void*, uint16_t jis, uint8_t out[32]) {
 }
 // ANK は 0x20-0x7E と半角カナ（0xA1-0xDF）だけをもらう。
 // それ以外（罫線・ブロック・記号・年月日…）は擬似漢字 ROM（core/fontrom.cpp）が作る。
+static bool g_ank_shift = true;   // INI の FontShift=（既定 1）
 static void cb_ank(void*, uint8_t c, uint8_t out[16]) {
     wchar_t wc[2] = {0};
     if (c == 0x5C) wc[0] = 0x00A5;                       // PC-98 の 5Ch は円記号
@@ -211,6 +212,14 @@ static void cb_ank(void*, uint8_t c, uint8_t out[16]) {
     else if (c >= 0xA1 && c <= 0xDF) { char b = (char)c; MultiByteToWideChar(932, 0, &b, 1, wc, 2); }
     if (!wc[0]) { memset(out, 0, 16); return; }
     font_draw(wc, 1, 8, out, 1);
+    // 実機の ROM の半角（8x16）は左端の 1 列を空けてある。Windows のフォントは左端から描くことがあるので、
+    // 右端が空いていれば 1 ドット右へ寄せる。2 行を 1 ワードにして左へずらす「太字」を作るソフト（MIMPI V4 の
+    // 曲名）で、下の行の左端が上の行の右端にはみ出して点線のように崩れないように
+    if (g_ank_shift) {
+        uint8_t l = 0, r = 0;
+        for (int y = 0; y < 16; y++) { l |= out[y] & 0x80; r |= out[y] & 0x01; }
+        if (l && !r) for (int y = 0; y < 16; y++) out[y] = (uint8_t)(out[y] >> 1);
+    }
 }
 
 // ---- キー変換（スキャンコード → PC-98）-----------------------------------------
@@ -1480,7 +1489,7 @@ static void apply_live_settings(const PlayerSettings& o) {
             g_p->midi_sink = midi_sink;
         }
     }
-    if (n.font_name != o.font_name) { font_init(W(n.font_name)); FontSource fs; fs.kanji = cb_kanji; fs.ank = cb_ank; fs.narrow = cb_narrow; fs.user = nullptr; video_set_font(fs); }
+    if (n.font_name != o.font_name || n.font_shift != o.font_shift) { g_ank_shift = n.font_shift; font_init(W(n.font_name)); FontSource fs; fs.kanji = cb_kanji; fs.ank = cb_ank; fs.narrow = cb_narrow; fs.user = nullptr; video_set_font(fs); }
     if (n.fullscreen != g_full) toggle_fullscreen();
     if (n.scale != o.scale && !g_full) {
         int ww, wh; window_size_for_scale(n.scale, &ww, &wh);
@@ -1652,6 +1661,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
         if (!bad.empty()) g_startup_note = L"INI のゲームパッドの割り当てが読めません: " + bad;
     }
 
+    g_ank_shift = ps.font_shift;
     font_init(W(ps.font_name));
     FontSource fs; fs.kanji = cb_kanji; fs.ank = cb_ank; fs.narrow = cb_narrow; fs.user = nullptr;
     video_set_font(fs);

@@ -182,7 +182,7 @@ static void pit_write(Machine* m, int ch, uint8_t v) {
     else t->reload = v;
     t->counter = t->reload;
     t->armed = 1;
-    if (ch == 1) m->beepw.push_back({m->ticks, -2});   // 周波数変化
+    if (ch == 1) m->beepw.push_back({m->ticks, 0x100000 | t->reload});   // 周波数変化（いつ変わったかも残す。BEEP の時分割和音のため）
 }
 static uint8_t pit_read(Machine* m, int ch) {
     Pit* t = &m->pit[ch];
@@ -531,6 +531,7 @@ uint8_t mem_rb_slow(Machine* m, uint32_t a) {
         return m->gvram[m->draw_bank][p][off];
     }
     if (a >= 0xD0000 && a < 0xE0000 && m->cfg.ems) return m->ram[a];   // EMS ページフレーム
+    if (a >= 0xCC000 && a < 0xD0000 && m->cfg.sound_bios && m->cfg.sound_board) return m->ram[a];   // サウンド BIOS の ROM
     if (a < 0xE0000) return 0xFF;
     if (a < 0x100000) return m->ram[a];
     if (a < PC98_RAM_SIZE) return m->ram[a];
@@ -642,7 +643,11 @@ uint8_t io_in8_(Machine* m, uint16_t port) {
     case 0x31: return 0x63;                 // DIP SW 2
     case 0x33: return 0xE8;                 // bit3: 高解像度ではない（普通の 400 ライン）
     case 0x35: return m->portc;
-    case 0x42: return 0xA0 | 0x20;           // bit5=1: 8MHz 系
+    // プリンタのポート B。bit7=1・bit2=1（プリンタは忙しくない）・bit5=1（8MHz 系）・bit4=DIP SW 1-3（実機の標準はオン）。
+    // bit4 が 0 だとアナログ 16 色を使えない画面とみなして、パレットを 8 色の近似に落とすソフトがある（サバッシュII のロゴなど）
+    case 0x42: return 0x84 | 0x20 | 0x10;
+    case 0x30: return 0x00;                 // RS-232C 受信データ（何も来ない）
+    case 0x32: return 0x85;                 // RS-232C 状態: DSR・送信バッファ空・送信できる（受信なし）
     case 0x60: return gdc_status(m, &m->gdcm);
     case 0x62: { if (m->gdcm.fifo.empty()) return 0; uint8_t v = m->gdcm.fifo.front(); m->gdcm.fifo.erase(m->gdcm.fifo.begin()); return v; }
     case 0xA0: return gdc_status(m, &m->gdcs);
@@ -702,6 +707,9 @@ void io_out8(Machine* m, uint16_t port, uint8_t v) {
     case 0x08: pic_write(m, 1, 0, v); return;
     case 0x0A: pic_write(m, 1, 1, v); return;
     case 0x41: case 0x43: return;           // 8251 コマンド
+    // RS-232C（8251）: 送ったバイトは MIDI として出す（RS-232C の MIDI インターフェース。INI の MIDI=1 のとき）
+    case 0x30: if (m->cfg.midi) m->midi_out.push_back(v); return;
+    case 0x32: return;                      // モード・コマンドは覚えなくてよい（いつでも送れる扱い）
     case 0x35: sysport_c_write(m, v); return;
     case 0x37:
         if (!(v & 0x80)) {

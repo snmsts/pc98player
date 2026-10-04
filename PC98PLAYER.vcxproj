@@ -66,6 +66,7 @@
     <ClCompile Include="core\xmsems.cpp" />
     <ClCompile Include="core\pcm86.cpp" />
     <ClCompile Include="core\lio.cpp" />
+    <ClCompile Include="core\soundbios.cpp" />
     <ClCompile Include="core\floppy.cpp" />
     <ClCompile Include="core\fdflux.cpp" />
     <ClCompile Include="core\fdreal.cpp" />
