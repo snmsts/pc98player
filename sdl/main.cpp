@@ -1240,10 +1240,10 @@ static void apply_live_settings(const PlayerSettings& o) {
         g_p->midi_sink = nullptr;
         if (n.cfg.midi && !midi_open(n.midi_device)) show_toast("MIDI の出力を開けませんでした");
     }
-    if (n.font_name != o.font_name) {
+    if (n.font_name != o.font_name || n.font_shift != o.font_shift) {
         std::string ferr;
         if (!hostfont_open(n.font_name, &ferr)) show_toast(ferr);
-        hostfont_install();
+        hostfont_install(n.font_shift);
     }
     bool full = (SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN) != 0;
     if (n.fullscreen != full) toggle_fullscreen();
@@ -1306,7 +1306,7 @@ int main(int argc, char** argv) {
 
     std::string ferr;
     bool font_ok = hostfont_open(ps.font_name, &ferr);
-    hostfont_install();
+    hostfont_install(ps.font_shift);
 
     set_title_from(ps);
 

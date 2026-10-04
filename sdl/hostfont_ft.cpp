@@ -113,15 +113,18 @@ static void draw(uint32_t cp, int w, int xsize, uint8_t* out, int stride_bytes) 
 
 static void cb_kanji(void*, uint16_t jis, uint8_t out[32]) { draw(jis_to_cp(jis), 16, 16, out, 2); }
 static void cb_narrow(void*, uint16_t jis, uint8_t out[16]) { draw(jis_to_cp(jis), 8, 8, out, 1); }
+static bool s_ank_shift = true;
 static void cb_ank(void*, uint8_t c, uint8_t out[16]) {
     uint32_t cp = 0;
     if (c == 0x5C) cp = 0x00A5;                          // PC-98 の 5Ch は円記号
     else if (c >= 0x20 && c < 0x7F) cp = c;
     else if (c >= 0xA1 && c <= 0xDF) cp = 0xFF61 + (c - 0xA1);   // 半角カナ
     draw(cp, 8, 16, out, 1);
+    if (s_ank_shift) hostfont_shift_ank(out);
 }
 
-void hostfont_install() {
+void hostfont_install(bool ank_shift) {
+    s_ank_shift = ank_shift;
     FontSource fs; fs.kanji = cb_kanji; fs.ank = cb_ank; fs.narrow = cb_narrow; fs.user = nullptr;
     video_set_font(fs);
 }

@@ -57,7 +57,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp -R build/Release/PC98PLAYER.exe README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual dist/
+          cp -R build/Release/PC98PLAYER.exe README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual 設定INI作成.html dist/
       - uses: actions/upload-artifact@v7
         with:
           name: PC98PLAYER-windows-${{ matrix.arch }}

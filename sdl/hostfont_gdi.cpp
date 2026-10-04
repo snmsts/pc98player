@@ -75,6 +75,7 @@ static void cb_narrow(void*, uint16_t jis, uint8_t out[16]) {
     draw(wc, n, 8, out, 1, s_font8);
 }
 // ANK は 0x20-0x7E と半角カナだけ。残りは擬似漢字 ROM（core/fontrom.cpp）が作る
+static bool s_ank_shift = true;
 static void cb_ank(void*, uint8_t c, uint8_t out[16]) {
     wchar_t wc[2] = {0};
     if (c == 0x5C) wc[0] = 0x00A5;
@@ -82,9 +83,11 @@ static void cb_ank(void*, uint8_t c, uint8_t out[16]) {
     else if (c >= 0xA1 && c <= 0xDF) { char b = (char)c; MultiByteToWideChar(932, 0, &b, 1, wc, 2); }
     if (!wc[0]) { memset(out, 0, 16); return; }
     draw(wc, 1, 8, out, 1, s_font16);
+    if (s_ank_shift) hostfont_shift_ank(out);
 }
 
-void hostfont_install() {
+void hostfont_install(bool ank_shift) {
+    s_ank_shift = ank_shift;
     FontSource fs; fs.kanji = cb_kanji; fs.ank = cb_ank; fs.narrow = cb_narrow; fs.user = nullptr;
     video_set_font(fs);
 }
