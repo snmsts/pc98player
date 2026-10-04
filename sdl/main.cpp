@@ -181,6 +181,66 @@ static bool midi_open(int) { return false; }
 static void midi_close() {}
 #endif
 
+// ---- MIDI の音源（MidiSoundFont= に .sf2 を書くと、どの OS でも TinySoundFont で鳴らす）--------
+// メッセージはフレームの頭にまとめて届くので、フレームぶんの音を作って本体の音に足す
+#define TSF_IMPLEMENTATION
+#include "tsf.h"
+static std::string g_sf_spec;        // INI の MidiSoundFont=
+static tsf*        g_sf = nullptr;
+static std::vector<float> g_sf_buf;
+static void sf_reset() {
+    tsf_reset(g_sf);   // 鳴っている音を止め、チャンネルの状態を捨てる
+    for (int ch = 0; ch < 16; ch++) tsf_channel_set_presetnumber(g_sf, ch, 0, ch == 9);   // 10ch はドラム
+}
+static void sf_sink(void*, const uint8_t* msg, int len) {
+    if (!g_sf || len <= 0) return;
+    if (msg[0] == 0xF0) {
+        // GM System On / GS Reset / XG System On はリセットとして扱う（他の SysEx は無視）
+        bool gm = len >= 6 && msg[1] == 0x7E && msg[3] == 0x09 && msg[4] == 0x01;
+        bool gs = len >= 11 && msg[1] == 0x41 && msg[3] == 0x42 && msg[4] == 0x12 && msg[5] == 0x40 && msg[6] == 0x00 && msg[7] == 0x7F;
+        bool xg = len >= 9 && msg[1] == 0x43 && msg[3] == 0x4C && msg[4] == 0x00 && msg[5] == 0x00 && msg[6] == 0x7E;
+        if (gm || gs || xg) sf_reset();
+        return;
+    }
+    if (msg[0] >= 0xF0 || len < 2) return;
+    int ch = msg[0] & 15, d1 = msg[1], d2 = len > 2 ? msg[2] : 0;
+    switch (msg[0] & 0xF0) {
+    case 0x90: if (d2) tsf_channel_note_on(g_sf, ch, d1, d2 / 127.0f); else tsf_channel_note_off(g_sf, ch, d1); break;
+    case 0x80: tsf_channel_note_off(g_sf, ch, d1); break;
+    case 0xB0: tsf_channel_midi_control(g_sf, ch, d1, d2); break;
+    case 0xC0: tsf_channel_set_presetnumber(g_sf, ch, d1, ch == 9); break;
+    case 0xE0: tsf_channel_set_pitchwheel(g_sf, ch, d1 | (d2 << 7)); break;
+    }
+}
+static void sf_close() { if (g_sf) { tsf_close(g_sf); g_sf = nullptr; } }
+// path が相対ならゲームのフォルダから
+static bool sf_open(const std::string& path, const std::string& root, int rate, std::string* err) {
+    fs::path p = P(path);
+    if (p.is_relative()) p = P(root) / p;
+    std::ifstream f(p, std::ios::binary);
+    std::vector<char> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (data.empty() || !(g_sf = tsf_load_memory(data.data(), (int)data.size()))) {
+        *err = "SoundFont を読めませんでした: " + path;
+        return false;
+    }
+    tsf_set_output(g_sf, TSF_STEREO_INTERLEAVED, rate, 0);
+    tsf_set_max_voices(g_sf, 128);
+    sf_reset();
+    return true;
+}
+// 本体の 1 フレームぶんの音（ステレオ）に足す
+static void sf_mix(std::vector<int16_t>& a, int volume) {
+    if (!g_sf || a.empty()) return;
+    int n = (int)a.size() / 2;
+    g_sf_buf.resize(a.size());
+    tsf_render_float(g_sf, g_sf_buf.data(), n, 0);
+    float k = 32767.0f * volume / 100.0f;
+    for (size_t i = 0; i < a.size(); i++) {
+        int v = a[i] + (int)(g_sf_buf[i] * k);
+        a[i] = (int16_t)std::max(-32768, std::min(32767, v));
+    }
+}
+
 // ---- 音 ------------------------------------------------------------------------
 static SDL_AudioStream* g_audio = nullptr;
 static void audio_open(int rate) {
@@ -189,8 +249,10 @@ static void audio_open(int rate) {
     g_audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
     if (g_audio) SDL_ResumeAudioStreamDevice(g_audio);
 }
-static void audio_flush() { if (g_audio) SDL_ClearAudioStream(g_audio); midi_all_off(); }
-// 1 フレームぶんを送る。溜まりすぎていたら捨てる（遅れを増やさない）、空になっていたら 1 フレーム先行させる
+static void audio_flush() { if (g_audio) SDL_ClearAudioStream(g_audio); midi_all_off(); if (g_sf) tsf_note_off_all(g_sf); }
+// 1 フレームぶんを送る。溜まりすぎていたら捨てる（遅れを増やさない）、空になっていたら 1 フレーム先行させる。
+// SoundFont の音は送るフレームにだけ作る（捨てるフレームでは作らず、先行させるフレームには続きを入れる）。
+// こうしないと伸ばしている音が捨てた所・無音の所でぷつっと切れる
 static void audio_push_frame() {
     if (!g_audio || g_p->audio.empty()) return;
     int bytes = (int)(g_p->audio.size() * sizeof(int16_t));
@@ -198,8 +260,10 @@ static void audio_push_frame() {
     if (q >= g_audio_frames) return;
     if (q == 0) {
         std::vector<int16_t> sil(g_p->audio.size(), 0);
+        sf_mix(sil, g_p->ps.volume);
         SDL_PutAudioStreamData(g_audio, sil.data(), bytes);
     }
+    sf_mix(g_p->audio, g_p->ps.volume);
     SDL_PutAudioStreamData(g_audio, g_p->audio.data(), bytes);
 }
 
@@ -862,7 +926,8 @@ static void write_template_ini(const std::string& path, const std::string& start
       << "; 仮想 CPU の速さ（MHz 相当）" << nl << "CpuMHz=16" << nl
       << "; ゲームのフォルダを何ドライブに見せるか" << nl << "Drive=A" << nl
       << "; 音源ボード（86 / 26 / 0=なし）と割込み（3/10/12/13）" << nl << "SoundBoard=86" << nl << "SoundIRQ=12" << nl
-      << "; MIDI（MPU-PC98II, E0D0h）を載せる。SDL 版では今は Windows だけ音が出る" << nl << "MIDI=0" << nl << "MidiDevice=-1" << nl
+      << "; MIDI（MPU-PC98II, E0D0h）を載せる。ホストの MIDI 出力へ送るのは今は Windows だけ" << nl << "MIDI=0" << nl << "MidiDevice=-1" << nl
+      << "; MIDI を SoundFont（.sf2）で鳴らす（どの OS でも。相対パスはゲームのフォルダから。空ならホストの MIDI 出力）" << nl << "MidiSoundFont=" << nl
       << "MidiSpeedFix=100" << nl
       << "; 起動時に入れるフロッピーイメージ（D88 / FDI / NFD / ベタ / SCP / HFE）と、そのドライブ名。F11 の画面でも入れ替えられる" << nl
       << "; （FloppyDisk= は FloppyImage= と同じ。どちらで書いてもよい）" << nl
@@ -1199,6 +1264,7 @@ static std::string apply_host_settings(const Ini& ini) {
     if ((g_mouse_lock_disable || g_mouse_shared) && g_captured) set_capture(false);
     if (g_win) update_title();
     g_audio_frames = std::max(1, std::min(30, ini.geti("PC98PLAYER.AUDIOFRAMES", 4)));
+    g_sf_spec = ini.get("PC98PLAYER.MIDISOUNDFONT", "");
     g_ini_memedit = ini.geti("PC98PLAYER.MEMORYEDITOR", 0) != 0;
     g_ini_codeedit = ini.geti("PC98PLAYER.CODEEDITOR", 0) != 0;
     pad::s_notice = show_toast;
@@ -1230,16 +1296,30 @@ static bool reload_settings(PlayerSettings* out, std::string* err) {
 static void set_title_from(const PlayerSettings& ps) {
     g_title = (ps.title.empty() ? base_name(ps.cfg.root) : ps.title) + " - PC98PLAYER";
 }
+// MIDI の出口を開く: MidiSoundFont= があれば SoundFont、無いか読めなければホストの MIDI 出力
+static std::string g_sf_open_spec;   // 今開いている MidiSoundFont=
+static void midi_start() {
+    midi_close();
+    sf_close();
+    g_p->midi_sink = nullptr;
+    g_sf_open_spec = g_sf_spec;
+    const PlayerSettings& ps = g_p->ps;
+    if (!ps.cfg.midi) return;
+    std::string err;
+    if (!g_sf_spec.empty()) {
+        if (sf_open(g_sf_spec, ps.cfg.root, ps.sample_rate, &err)) { g_p->midi_sink = sf_sink; return; }
+        show_toast(err);
+    }
+    if (!midi_open(ps.midi_device) && err.empty()) show_toast("MIDI の出力を開けませんでした");
+}
 // 起動し直したあと、窓や音の出口など、本体の外の設定を新しい INI に合わせる
 static void apply_live_settings(const PlayerSettings& o) {
     const PlayerSettings& n = g_p->ps;
     set_title_from(n);
     if (n.sample_rate != o.sample_rate) { if (g_audio) SDL_DestroyAudioStream(g_audio); g_audio = nullptr; audio_open(n.sample_rate); }
-    if (n.cfg.midi != o.cfg.midi || n.midi_device != o.midi_device) {
-        midi_close();
-        g_p->midi_sink = nullptr;
-        if (n.cfg.midi && !midi_open(n.midi_device)) show_toast("MIDI の出力を開けませんでした");
-    }
+    if (n.cfg.midi != o.cfg.midi || n.midi_device != o.midi_device || g_sf_spec != g_sf_open_spec
+        || (g_sf && n.sample_rate != o.sample_rate))
+        midi_start();
     if (n.font_name != o.font_name || n.font_shift != o.font_shift) {
         std::string ferr;
         if (!hostfont_open(n.font_name, &ferr)) show_toast(ferr);
@@ -1330,7 +1410,7 @@ int main(int argc, char** argv) {
     if (!g_p->init(ps, &err)) { message(SDL_MESSAGEBOX_ERROR, err); return 1; }
     if (ps.cfg.boot_fd || !ps.cfg.floppy_image2.empty()) build_disk_list();
     audio_open(ps.sample_rate);
-    if (ps.cfg.midi && !midi_open(ps.midi_device)) show_toast("MIDI の出力を開けませんでした");
+    midi_start();
     if (ps.fullscreen) toggle_fullscreen();
     update_title();
     if (!font_ok) show_toast(ferr);
@@ -1432,6 +1512,7 @@ int main(int argc, char** argv) {
     set_capture(false);
     if (g_audio) SDL_DestroyAudioStream(g_audio);
     midi_close();
+    sf_close();
     g_p->shutdown();
     SDL_Quit();
     return 0;

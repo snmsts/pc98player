@@ -78,6 +78,7 @@ dist: ymfm deps
 	cp -R $(B)/app/$(APP) README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual 設定INI作成.html $(DIST)/$(TAG)/
 	cp $(SRC)/SDL/LICENSE.txt $(DIST)/$(TAG)/THIRD-PARTY-SDL3-LICENSE.txt
 	cp $(SRC)/freetype/docs/FTL.TXT $(DIST)/$(TAG)/THIRD-PARTY-FreeType-LICENSE.txt
+	cp third_party/TinySoundFont/LICENSE $(DIST)/$(TAG)/THIRD-PARTY-TinySoundFont-LICENSE.txt
 ifeq ($(OS),macos)
 	codesign --force --sign - $(DIST)/$(TAG)/$(APP)
 	cd $(DIST) && rm -f PC98PLAYER-$(TAG).zip && ditto -c -k --keepParent $(TAG) PC98PLAYER-$(TAG).zip

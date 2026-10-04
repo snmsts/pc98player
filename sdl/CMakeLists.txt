@@ -14,6 +14,7 @@ find_package(SDL3 REQUIRED CONFIG)
 
 file(GLOB CORE ${ROOT}/core/*.cpp)
 set(SRC ${CORE} main.cpp)
+include_directories(${ROOT}/third_party/TinySoundFont)   # tsf.h（MidiSoundFont=）
 
 set(YMFM ${ROOT}/third_party/ymfm/src)
 if(EXISTS ${YMFM}/ymfm_opn.cpp)
