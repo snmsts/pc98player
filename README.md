@@ -59,7 +59,7 @@ EXE を 1 か所に置いたまま使い回す場合は、ショートカット�
 | 層 | 中身 |
 |---|---|
 | CPU | i386 リアルモードのインタプリタ（8086/V30/286 上位互換、32bit レジスタ・386 命令込み） |
-| ハードウェア | GDC（テキスト/グラフィック、200 ライン表示）、GRCG、**EGC**、16 色アナログパレット、8259、8253、キーボード、バスマウス、漢字 ROM ポート・外字、YM2608(OPNA)、**86 ボードの PCM**、**MPU-PC98II（MIDI）**、ROM のグラフィック LIO の入口（INT A0h-AFh。初期化系のみ、描画はしない）、**仮想フロッピー**（D88/ベタ/FDI/NFD/SCP/HFE、実機の USB フロッピー・Greaseweazle。INT 1Bh の ID 指定読み書き・READ ID、DOS の FAT12/16 ドライブ、INT 25h/26h） |
+| ハードウェア | GDC（テキスト/グラフィック、200 ライン表示）、GRCG、**EGC**、16 色アナログパレット、8259、8253、キーボード、バスマウス、漢字 ROM ポート・外字、YM2608(OPNA)、**86 ボードの PCM**、**MPU-PC98II（MIDI）**・RS-232C の MIDI 出力、ROM のグラフィック LIO（INT A0h-AFh。画面設定・色・点・線・箱・塗りつぶし・GGET/GPUT1。円・PAINT・漢字の GPUT2 は未対応）、**サウンド BIOS**（INT D2h。`SoundBIOS=1`。音色は自前）、ブザーの音程の変化（BEEP 演奏）、**仮想フロッピー**（D88/ベタ/FDI/NFD/SCP/HFE、実機の USB フロッピー・Greaseweazle。INT 1Bh の ID 指定読み書き・READ ID、DOS の FAT12/16 ドライブ、INT 25h/26h） |
 | BIOS | HLE: INT 18h（キー/CRT/グラフィック）、INT 1Ch（時計/インターバルタイマ）、IRQ1、INT 33h（マウスドライバ: カーソル表示・イベントハンドラ）、INT DCh |
 | DOS | HLE: INT 21h をゲームのフォルダへ直結（ファイル・FCB・MCB メモリ管理・EXEC・常駐終了・FindFirst・SFT/List of Lists など） |
 | 拡張メモリ | HLE: **HIMEM.SYS（XMS 3.0）** と **EMM386（LIM EMS 4.0、ページフレーム D000h）** |
@@ -71,6 +71,8 @@ EXE を 1 か所に置いたまま使い回す場合は、ショートカット�
 
 ## PC98PLAYER.INI
 
+同梱の **設定INI作成.html** をブラウザで開くと、項目を選ぶだけで INI を作って保存できます（今ある INI の読み込み・修正も可）。INI の項目を増やしたり既定値を変えたりしたら、このページの `SCHEMA` も合わせて直します。
+
 ```ini
 [PC98PLAYER]
 Start=KAKYU.BAT      ; 最初に実行するプログラム/バッチ（必須）
@@ -81,8 +83,9 @@ Smooth=0             ; 拡大をなめらかに
 CpuMHz=16            ; 仮想 CPU の速さ
 Drive=A              ; ゲームのフォルダを何ドライブに見せるか
 SoundBoard=86        ; 86 / 26 / 0（なし）
+SoundBIOS=0          ; 1 でサウンド BIOS（CC00h・INT D2h）を載せる（MIMPI の FM 演奏など。音色は自前）
 SoundIRQ=12          ; 3 / 10 / 12 / 13
-MIDI=0               ; 1 で MPU-PC98II（E0D0h）を載せ、Windows の MIDI 出力へ送る
+MIDI=0               ; 1 で MPU-PC98II（E0D0h）を載せ、Windows の MIDI 出力へ送る（RS-232C に送った MIDI も同じ出力へ）
 MidiDevice=-1        ; MIDI の出力先（-1 = 既定）
 FloppyImage=         ; 起動時に入れるフロッピーイメージ（D88 / ベタ / FDI / NFD / SCP / HFE）。F11 の画面で入れ替え・取り出し
 Boot=                ; FD: MS-DOS を使わず FloppyDisk= のフロッピーの IPL から起動（PC-98 初期の独自形式のディスク）
@@ -106,6 +109,7 @@ Volume=100           ; 全体音量 %（0〜1000。100 超はソフトリミッ�
 MouseSpeed=100       ; マウスの速さ %
 Title=               ; 窓のタイトル（空ならフォルダ名）
 Font=ＭＳ ゴシック    ; 漢字に使うフォント
+FontShift=1          ; 半角文字の左端の列を空ける（実機の ROM と同じに。MIMPI V4 の曲名の崩れ対策）
 KanjiJIS=78          ; 78=PC-98 と同じ旧 JIS の並び / 83=新 JIS
 ExitOnEnd=1          ; ゲーム（バッチ）が終わったら窓を閉じる
 PauseInactive=0      ; 非アクティブ時に止める
@@ -192,6 +196,7 @@ PC-98 の漢字 ROM・ANK ROM を、**本物の ROM も第三者のビットマ�
 | スレイヤーズ！（バンプレスト, 1994） | SL.BAT | マウスの割込み処理がスレーブだけ EOI し、マスタの EOI を IRR 次第で省く → マスタの IR7 が処理中のまま。PC-98 のマスタは特殊完全入れ子モードなので、その間もスレーブの割込み（音源・マウス）を通す |
 | Ray IV2（音楽＆映像ソフト, 1995） | RAY.EXE | RIN.COM 常駐 → LIO の入口を ROM の表から写して GINIT → オープニング → メニュー → 曲の演奏（FM） |
 | メタ女 府立メタトポロジー大学付属女子高校 SP（HDD 版） | MTJ.BAT | MACACHE（LoL から DPB の鎖を辿る）→ RFMOUSE / PCP / PCML 常駐。PCML の音声は PIT で割込み、EOI に 0A0h（回転つき）を使い、86 の A466h bit0（LR クロック）で 1 標本ずつ同期する |
+| MIMPI V3.8（MIDI プレーヤー） | MIMPIV3.EXE | CANYON.MID を MIDI（MPU・RS-232C）・FM（サウンド BIOS、`SoundBIOS=1`）・BEEP（/I8）で演奏。画面は LIO で描く |
 | LEGAM | LEGAM.EXE | PMD/MMDR 常駐 → タイトル → 新規開始 → マップ・会話・BGM（PMD）再生 |
 | FLEIA | FLEIA.BAT | NA 常駐 → タイトルメニュー（テキスト VRAM の全角文字） |
 | 親父王 | OYAJIO.EXE | 簡易グラフで描くシューティングの画面 |
@@ -234,7 +239,8 @@ PC-98 の漢字 ROM・ANK ROM を、**本物の ROM も第三者のビットマ�
 
 ## まだ無いもの（今後）
 
-- LIO（N88-BASIC 系）。GDC の描画コマンド（直線・矩形・円弧・グラフィックキャラクタ）は対応済み
+- LIO の GCIRCLE・GPAINT・GPUT2・GROLL（N88-BASIC 系）。GDC の描画コマンド（直線・矩形・円弧・グラフィックキャラクタ）は対応済み
+- サウンド BIOS（INT D2h）の MML 演奏などの機能（MIMPI が使う、レジスタ書き込み・発音・音色・音量だけ対応）
 - ADPCM（86 ボード＋ちびおと、SPB 等の ADPCM RAM）
 - MPU-PC98II のインテリジェントモードの演奏機能（UART モードと、D0h 系の直接送信・問い合わせのみ対応）
 - 保護モード（DOS エクステンダ、VCPI/DPMI）。EMS/XMS は実モードの範囲で使えます

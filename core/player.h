@@ -22,6 +22,7 @@ struct PlayerSettings {
     bool   line200_gap = false;
     std::string title;
     std::string font_name;
+    bool        font_shift = true;  // ホストのフォントから作る半角文字の左端の列を空ける（実機の ROM と同じに）
     int    sample_rate = 44100;
     int    fm_volume = 100, ssg_volume = 100, beep_volume = 50, pcm_volume = 100;
     bool   jis78 = true;       // 漢字 ROM を旧 JIS（1978）の並びにする
@@ -53,6 +54,7 @@ struct Player {
     double sample_acc = 0;
     double beep_phase = 0;
     bool   beep_state = false;
+    uint16_t beep_reload = 998;   // ブザーの音程（PIT ch1 の値。フレームの途中の変化も追う）
     int32_t pcm_l = 0, pcm_r = 0;   // PCM86 の直前の標本
     // MIDI の出口（ホストが設定）。完結したメッセージ（SysEx は F0..F7 まるごと）を渡す
     void (*midi_sink)(void* user, const uint8_t* msg, int len) = nullptr;

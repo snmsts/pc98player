@@ -675,6 +675,7 @@ void bios_hle(Machine* m, uint8_t n) {
     case HLE_MSIRQ: mdrv_irq(m); return;
     case HLE_MSIRQ_END: m->mdrv.in_cb = 0; return;
     case HLE_INTDC: intdc(m); return;
+    case HLE_SNDBIOS: soundbios_hle(m); return;
     case HLE_INT06: {
         uint32_t a = lin(m->cpu.sr[SS_], (uint16_t)m->cpu.r[ESP]);
         uint16_t ip = mem_rw(m, a), cs = mem_rw(m, a + 2);
@@ -759,6 +760,10 @@ void bios_init(Machine* m) {
     // リセットベクタ（使わないが念のため）
     r[0xFFFF0] = 0xF4;
     lio_init(m);
+    soundbios_init(m);
+    // PIT のチャンネル 1（ブザーの音程）は BIOS がモード 3・下位/上位の順で 2kHz（998）に設定しておく。
+    // 制御語を書かずに 3FDBh へ下位・上位を書くソフト（MIMPI の BEEP 演奏など）がある
+    m->pit[1].mode = 3; m->pit[1].access = 3; m->pit[1].reload = m->pit[1].counter = 998; m->pit[1].wr_hi = 0;
     // ROM の識別に使われることがある領域
     r[0xFFFFE] = 0xFE;
 }

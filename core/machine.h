@@ -129,6 +129,7 @@ struct Config {
     int      cpu_mhz = 16;
     int      sound_irq = 12;     // 既定は PC-9801-86 の INT5
     int      sound_board = 86;   // 86 / 26 / 0
+    bool     sound_bios = false; // CC00h にサウンド BIOS（INT D2h）を置く（SoundBIOS=1）
     bool     fm_enable = true;
     int      memory_kb = 640;
     bool     emulate_mouse = true;
@@ -321,6 +322,8 @@ bool bios_boot_fd(Machine* m, std::string* why);
 bool bios_rom_trap(Machine* m);
 void bios_hle(Machine* m, uint8_t n);
 void lio_init(Machine* m);
+void soundbios_init(Machine* m);
+void soundbios_hle(Machine* m);
 void lio_hle(Machine* m, uint8_t n);
 void bios_key_irq(Machine* m);
 void console_putc(Machine* m, uint8_t c);
@@ -378,6 +381,7 @@ enum {
     HLE_INT29      = 0x29,
     HLE_INT2F      = 0x2F,
     HLE_INT33      = 0x33,
+    HLE_SNDBIOS    = 0xD2,   // サウンド BIOS（INT D2h）
     HLE_INTDC      = 0xDC,
     HLE_INT67      = 0x67,
     HLE_LIO        = 0xA0,   // 0xA0-0xAF: グラフィック LIO（INT A0h-AFh）

@@ -74,6 +74,7 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
     ps->cfg.drive = drv.empty() ? 'A' : (char)toupper((unsigned char)drv[0]);
     ps->cfg.cpu_mhz = I("CPUMHZ", I("CPUCLOCK", 16));
     ps->cfg.sound_board = I("SOUNDBOARD", 86);
+    ps->cfg.sound_bios = I("SOUNDBIOS", 0) != 0;
     ps->cfg.sound_irq = I("SOUNDIRQ", 12);
     ps->cfg.fm_enable = I("SOUND", 1) != 0;
     ps->cfg.memory_kb = I("MEMORYKB", 640);
@@ -103,6 +104,7 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
     ps->exit_on_end = I("EXITONEND", 1) != 0;
     ps->title = G("TITLE", "");
     ps->font_name = G("FONT", "");
+    ps->font_shift = I("FONTSHIFT", 1) != 0;
     ps->rhythm_rom = G("RHYTHMROM", "");
     ps->jis78 = I("KANJIJIS", 78) != 83;
     ps->sample_rate = I("SAMPLERATE", 44100);
@@ -288,6 +290,7 @@ void Player::run_frame(bool render_video, bool render_audio) {
             int v = m->beepw[bi].second;
             if (v == 0) beep_state = false;
             else if (v == 1) beep_state = true;
+            else if (v & 0x100000) beep_reload = (uint16_t)v;
             bi++;
         }
         float l = 0, r = 0;
@@ -305,7 +308,7 @@ void Player::run_frame(bool render_video, bool render_audio) {
             l += pcm_l * pvol; r += pcm_r * pvol;
         }
         if (beep_state) {
-            uint32_t rel = m->pit[1].reload ? m->pit[1].reload : 0x10000u;
+            uint32_t rel = beep_reload ? beep_reload : 0x10000u;
             double f = (MASTER_CLOCK / 4.0) / rel;
             beep_phase += f / ps.sample_rate;
             if (beep_phase >= 1.0) beep_phase -= floor(beep_phase);
@@ -330,7 +333,7 @@ void Player::run_frame(bool render_video, bool render_audio) {
         sample_acc += step;
     }
     for (; wi < m->regw.size(); wi++) opna->write(m->regw[wi].part, m->regw[wi].addr, m->regw[wi].val);
-    for (; bi < m->beepw.size(); bi++) { int v = m->beepw[bi].second; if (v == 0) beep_state = false; else if (v == 1) beep_state = true; }
+    for (; bi < m->beepw.size(); bi++) { int v = m->beepw[bi].second; if (v == 0) beep_state = false; else if (v == 1) beep_state = true; else if (v & 0x100000) beep_reload = (uint16_t)v; }
     if (pi < m->pcm_out.size()) { pcm_l = m->pcm_out.back().l; pcm_r = m->pcm_out.back().r; }
     if (!(m->pcm86.ctrl & 0x80)) pcm_l = pcm_r = 0;
     m->pcm_out.clear();
@@ -374,7 +377,7 @@ bool Player::reboot(std::string* err) {
 bool Player::reboot(const PlayerSettings& s0, std::string* err) {
     PlayerSettings s = s0;
     shutdown();
-    sample_acc = 0; beep_phase = 0; beep_state = false; pcm_l = pcm_r = 0;
+    sample_acc = 0; beep_phase = 0; beep_state = false; beep_reload = 998; pcm_l = pcm_r = 0;
     floppy_error.clear();
     return init(s, err);
 }
@@ -413,6 +416,7 @@ bool Player::restore(const uint8_t* data, size_t len) {
     xmsems_state_load(m, r);
     r.tag("PLAY");
     r.pod(sample_acc); r.pod(beep_phase); r.pod(beep_state);
+    beep_reload = m->pit[1].reload;
     uint32_t clen = r.u32();
     std::vector<uint8_t> chip;
     if (r.ok && clen <= 16 * 1024 * 1024) { chip.resize(clen); r.bytes(chip.data(), clen); } else r.ok = false;

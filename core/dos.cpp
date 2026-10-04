@@ -181,6 +181,9 @@ static std::string to83(const std::string& comp) {
         return r;
     };
     base = cut(base, 8); ext = cut(ext, 3);
+    // 「GAMEKWD .TOJ」のように 8 文字ぶん空白で埋めた名前は、空白を除いた名前と同じ（DOS は名前を 8+3 の空白埋めで持つ）
+    while (!base.empty() && base.back() == ' ') base.pop_back();
+    while (!ext.empty() && ext.back() == ' ') ext.pop_back();
     return ext.empty() ? base : base + "." + ext;
 }
 static bool valid83(const std::string& name) {
@@ -1885,6 +1888,8 @@ static bool run_command(Machine* m, const std::string& cmdline) {
     std::string arg = trim(rest);
     std::string uarg = upper_dbcs(arg);
 
+    // 「A::」のように : が重なっても（バッチの %2: に A: が入ったとき）COMMAND.COM はドライブ変更として受け付ける
+    while (cmd.size() > 2 && cmd[1] == ':' && cmd.back() == ':' && arg.empty()) cmd.pop_back();
     if (cmd.size() == 2 && cmd[1] == ':') {                               // ドライブ変更
         char d = cmd[0];
         if (drive_valid(m, d)) s_curdrv = d == m->cfg.drive ? 0 : d;
@@ -2062,6 +2067,7 @@ static bool run_command(Machine* m, const std::string& cmdline) {
         std::string a = trim(arg);
         std::string ua = upper_dbcs(a);
         size_t in = ua.find(" IN "), lp = a.find('('), rp = a.find(')'), dw = ua.find(" DO ", rp == std::string::npos ? 0 : rp);
+        if (in == std::string::npos) in = ua.find(" IN(");   // 「FOR %%A IN( \ZAVAS2\*.*) DO …」のように IN と ( がくっついていても受け付ける
         if (a.size() < 2 || a[0] != '%' || in == std::string::npos || lp == std::string::npos || rp == std::string::npos || dw == std::string::npos) return false;
         std::string var = trim(a.substr(0, in));
         std::string set = a.substr(lp + 1, rp - lp - 1);
