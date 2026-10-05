@@ -185,7 +185,7 @@ Args=B
 CurrentDrive=A
 ExitOnEnd=0</pre>
 <ul>
-  <li><code>Start=B:\INSTALL.BAT</code> のようにドライブ付きで書くと、そのドライブをカレントにして実行します。<code>CurrentDrive=</code> で別のドライブをカレントにもできます。</li>
+  <li><code>Start=B:\INSTALL.BAT</code> のようにドライブ付きで書くと、そのドライブをカレントにして実行します。<code>CurrentDrive=</code> で別のドライブをカレントにもできます。<br>「カレントドライブにインストールする」インストーラ（実機では <code>A&gt;</code> から <code>B:INSTALL</code> と打って使うもの。同級生など）は、<code>Start=B:\INSTALL.EXE</code> と <code>CurrentDrive=A</code>（ゲームのフォルダ）を一緒に書きます。書かないとカレントがフロッピーになり、「カレントドライブがハードディスクドライブではありません」と止まります。<br>説明書に「A:\NANPA を作り、そこをカレントにして実行」とあるもの（「カレントディレクトリーがルートディレクトリーです」と止まるもの）は、<code>CurrentDirectory=A:\NANPA\</code> を書きます。フォルダはゲームのフォルダの下に自動で作られ、インストール先も <code>NANPA</code> フォルダになります。遊ぶときは <code>Start=NANPA\NANPA.BAT</code> とします。</li>
   <li>フロッピーを A: にしないと動かないインストーラは、<code>Drive=B</code>・<code>FloppyDrive=A</code> のように入れ替えます。</li>
   <li>インストーラが <code>COMMAND.COM /C COPY …</code> のように呼ぶ内部コマンド（COPY・MD・DEL など）にも対応しています。</li>
   <li>インストールが終わったら、<code>Start=</code> などをゲームの起動用に書き換えます（<code>FloppyImage=</code> はキーディスクが要らなければ消します）。</li>

@@ -172,6 +172,7 @@ Start=DEPTH.EXE</pre>
   <li>右下の「その他」の欄の「M: メモリエディタ」（<kbd>M</kbd> キー）で<a href="ch5.html">メモリエディタ</a>を、「C: コードエディタ」（<kbd>C</kbd> キー）で<a href="ch5.html#code">コードエディタ</a>を開けます。</li>
   <li>右下の「その他」の欄の「R: プログラム再起動」（<kbd>R</kbd> キー）で、PC-98 の電源を入れ直したのと同じように、ゲームを最初から起動し直せます。確認に「はい」と答えると、窓はそのままで起動し直します。入っているフロッピーはそのままです。ゲームでセーブしていない進行は失われますが、ステートセーブは残ります。<br>
     このとき <strong><code>PC98PLAYER.INI</code> も読み直します</strong>。INI をメモ帳で書き換えて保存 → <kbd>F11</kbd> → <kbd>R</kbd> →「はい」で、PC98PLAYER を閉じずに新しい設定で試せます（<a href="#reload">1-8 の「INI の読み直し」</a>）。</li>
+  <li>右下の「その他」の欄の「S: 画面＆サウンド設定」（<kbd>S</kbd> キー）で、画面・音源・MIDI・音量などを画面の上で変えて INI に保存できます（<a href="#settings">1-8 の「画面＆サウンド設定」</a>）。</li>
 </ul>
 <div class="warn"><strong>注意:</strong> PC98PLAYER の版が大きく変わると、古いステートを読めなくなる場合があります。大事な進行は、できるだけゲーム本来のセーブ機能でも保存してください。</div>
 
@@ -254,6 +255,27 @@ Start=A:\AUTOEXEC.BAT</pre>
 <p>ゲームのフォルダの <code>PC98PLAYER.INI</code> をメモ帳などで編集します。文字コードは Shift_JIS・UTF-8 のどちらでも構いません。
 <code>;</code> から行末まではコメントです。書かなかった項目は既定値になります。</p>
 <div class="note"><strong>設定INI作成.html:</strong> 同梱の <code>設定INI作成.html</code> をブラウザで開くと、項目を選ぶだけで INI ができあがり、［ダウンロード］で <code>PC98PLAYER.INI</code> として保存できます（ネットにはつながりません）。最初に実行するプログラムやフロッピーイメージはファイル選択・ドラッグ＆ドロップで入れられ、今ある INI を読み込んで直すこともできます。</div>
+<h3 id="settings">画面＆サウンド設定（INI を画面で直す）</h3>
+<p>ゲーム中に <kbd>F11</kbd> →「S: 画面＆サウンド設定」（<kbd>S</kbd> キー）で、よく変える項目を画面の上で直し、<code>PC98PLAYER.INI</code> に保存できます。メモ帳で INI を開く必要はありません。</p>
+<figure>
+  <img src="images/ch1_settings.png" alt="画面＆サウンド設定の窓" width="772" height="582">
+  <figcaption>図 1-6　画面＆サウンド設定。左が画面と動作、右が音源と MIDI、下が音量です。</figcaption>
+</figure>
+<ul>
+  <li><strong>画面:</strong> 表示倍率・なめらか・全画面で起動・漢字のフォント・半角の 1 ドット寄せ・漢字の字形</li>
+  <li><strong>動作:</strong> CPU の速さ（8〜133MHz から選ぶか、数字を直接入力）・マウスの速さ・キーリピート・ほかの窓を使っている間の一時停止・終わったら窓を閉じる</li>
+  <li><strong>サウンド:</strong> 音源ボード（86／26K／なし）・割込み・サウンド BIOS・FM 音源・サンプリング周波数</li>
+  <li><strong>MIDI:</strong> MIDI を使う（<code>MIDI=1</code>）・出力先（Windows の MIDI 出力の一覧から選ぶ）・割込み・演奏速度。<br>
+    <strong>「MIDI を使う」が OFF のままだと、ゲームで MIDI を選んでも鳴りません</strong>（欄の下に赤字で出ます）。MIDI が鳴らないときは、まずここを確かめてください。</li>
+  <li><strong>音量:</strong> 全体・FM・SSG・PCM・ビープ。つまみを動かすと<strong>その場で</strong>音量が変わるので、聞きながら合わせられます（欄には 1000% まで打ち込めます）。</li>
+</ul>
+<p>すぐ反映される項目（音量・倍率・なめらか・マウスの速さ・MIDI の出力先・演奏速度など）は、変えた時点で効きます。<strong>＊</strong> の付いた項目（音源ボード・MIDI を使う・CPU の速さ・フォントなど）は、プログラム再起動で反映されます。</p>
+<ol class="steps">
+  <li>「保存して閉じる」で INI を書き換えます。INI に書いてあった項目は値だけを置き換え、無かった項目は <code>[PC98PLAYER]</code> の最後に足します。コメントや並び、文字コード（Shift_JIS／UTF-8）はそのままです。変えていない項目は書きません。</li>
+  <li>＊ の項目を変えていたときは「今すぐプログラムを再起動しますか？」と尋ねます。「はい」で INI を読み直して起動し直し、「いいえ」なら次に <kbd>F11</kbd> → <kbd>R</kbd> で再起動したときから反映されます。</li>
+  <li>「キャンセル」（<kbd>Esc</kbd>）で閉じると、すぐ反映した項目も元に戻し、INI も書き換えません。「既定値に戻す」は、全部の項目を INI に何も書かないときの値にします（保存するまで INI は変わりません）。</li>
+</ol>
+<div class="note">設定の窓を開いている間もゲームは動いています（音量を聞きながら変えるため。<code>PauseInactive=1</code> でもこの窓に移ったときは止めません）。インストールアシスタントで動かしているときは INI が無いので開けません。ここに無い項目（フロッピー・メモリ・ゲームパッドなど）は、これまでどおり INI をメモ帳で直すか、<code>設定INI作成.html</code> を使います。</div>
 <p id="reload"><strong>INI の読み直し:</strong> 動かしたまま INI を書き換えて保存し、<kbd>F11</kbd> の画面の「R: プログラム再起動」を実行すると、INI を読み直してから PC-98 を起動し直します。
 設定を変えては試す、を EXE を立ち上げ直さずに繰り返せます。</p>
 <ul>
@@ -274,6 +296,7 @@ Start=A:\AUTOEXEC.BAT</pre>
   <tr><td><code>ExitOnEnd=</code></td><td>1</td><td>1: ゲーム（バッチ）が終わったら窓を閉じる。0: 閉じずに最後の画面を残す（エラーメッセージの確認に便利）。</td></tr>
   <tr><td><code>Drive=</code></td><td>A</td><td>ゲームのフォルダを何ドライブとして見せるか。ゲームが特定のドライブ名を前提にしている場合に変えます。</td></tr>
   <tr><td><code>CurrentDrive=</code></td><td>なし</td><td>起動したときのカレントドライブ。書かなければ <code>Start=</code> に付けたドライブ（無ければゲームのドライブ）。</td></tr>
+  <tr><td><code>CurrentDirectory=</code></td><td>なし</td><td>起動したときのカレントディレクトリ（例 <code>A:\NANPA\</code>）。ドライブを付けるとカレントドライブも兼ねます。ゲームのドライブに無いフォルダは起動時に作ります。「\NANPA を作ってそこから実行」と説明書にあるインストーラ向け。</td></tr>
   <tr><td><code>FreeSpaceMB=</code></td><td>96</td><td>ゲームのドライブの空き容量として見せる大きさ（MB、1〜1000）。大きすぎると計算があふれて「空きが足りない」と言うソフトがあるためです。</td></tr>
   <tr><td><code>DOSVersion=</code></td><td>5.00</td><td>ゲームに見せる MS-DOS の版。「DOS のバージョンが違います」と出る場合に 3.30 などを試します。</td></tr>
   <tr><td><code>FakeYear=</code></td><td>なし</td><td>ゲームに見せる年だけを置き換えます（例: <code>FakeYear=1998</code>）。<a href="ch4.html#y2k">2000 年問題</a>を参照。</td></tr>

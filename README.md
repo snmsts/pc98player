@@ -98,6 +98,7 @@ GWDrive=A            ; Greaseweazle のドライブ（A / B。Shugart 接続は 
 GWRevs=3             ; Greaseweazle で 1 トラックを何回転読むか（1〜8）
 FloppyDrive=B        ; フロッピーのドライブ名（A〜Z。Drive=B と FloppyDrive=A で入れ替えも可）。Start=B:\INSTALL.BAT のようにも書ける
 CurrentDrive=        ; 起動時のカレントドライブ（空 = Start= のドライブ）
+CurrentDirectory=    ; 起動時のカレントディレクトリ（例 A:\NANPA\。無ければ作る）
 FreeSpaceMB=96       ; ゲームのドライブの空き容量として見せる大きさ（MB）
 MidiSpeedFix=100     ; MIDI の演奏速度 %（10〜1000。MPU のテンポ＝クロック・トゥ・ホストだけを速める）
 EMS=1                ; EMS（EMM386 相当）。EMSKB=4096 で容量
@@ -124,6 +125,8 @@ JoyButton2=B         ;   A+RETURN のように重ねられる。NONE で無し�
 JoyDeadZone=50       ; アナログスティックの遊び %
 JoyRapid=4           ; 連射の速さ（何フレームごとに切り替えるか）
 ```
+
+**F11 → S（画面＆サウンド設定）** で、画面（倍率・なめらか・フォント）・音源ボード・MIDI（オン／オフ・出力先・割込み・演奏速度）・音量・CPU の速さなどを画面で変えて INI に保存できます（音量などはその場で反映。音源ボードや MIDI は保存時に再起動するか尋ねます。INI のコメントや並びはそのまま）。
 
 INI を書き換えたら、**F11 → R（プログラム再起動）** で INI を読み直して起動し直します（PC98PLAYER を閉じずに設定を試せます。FloppyDisk= / FloppyImage= は変えたときだけ入れ替え）。
 
