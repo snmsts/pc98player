@@ -26,6 +26,7 @@
 #include "../core/floppy.h"
 #include "../core/fdreal.h"
 #include "../core/hdimage.h"
+#include "../core/opna_renderer.h"
 #include "hostfont.h"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -67,12 +68,12 @@ static void message(SDL_MessageBoxFlags kind, const std::string& text) {
     SDL_ShowSimpleMessageBox(kind, "PC98PLAYER", text.c_str(), g_win);
 }
 // はい／いいえ。default_yes=false なら Enter は「いいえ」
-static bool ask_yes_no(const std::string& title, const std::string& text, bool default_yes = true) {
+static bool ask_yes_no(const std::string& title, const std::string& text, bool default_yes = true, SDL_Window* parent = nullptr) {
     const SDL_MessageBoxButtonData bt[2] = {
         {default_yes ? (Uint32)SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT : 0u, 1, "はい"},
         {(Uint32)SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT | (default_yes ? 0u : (Uint32)SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT), 0, "いいえ"},
     };
-    SDL_MessageBoxData d = {SDL_MESSAGEBOX_INFORMATION | SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT, g_win, title.c_str(), text.c_str(), 2, bt, nullptr};
+    SDL_MessageBoxData d = {SDL_MESSAGEBOX_INFORMATION | SDL_MESSAGEBOX_BUTTONS_LEFT_TO_RIGHT, parent ? parent : g_win, title.c_str(), text.c_str(), 2, bt, nullptr};
     int id = 0;
     return SDL_ShowMessageBox(&d, &id) && id == 1;
 }
@@ -359,9 +360,12 @@ static const int MENU_COLS = 4, CELL_W = 150, CELL_H = 132, GRID_X = 20, GRID_Y 
 // 下の段: 1 行目 = フロッピーの名前（右端に前／次のディスク）、2 行目 = ボタン（左がフロッピー、右が「その他」）
 static const int FD_Y1 = 306, FD_Y = 330, FD_H = 20;
 static const int FD_INS_X = 20, FD_INS_W = 112, FD_EJ_X = 138, FD_EJ_W = 88, FD_UNIT_X = 232, FD_UNIT_W = 88;
-static const int OT_MEM_X = 326, OT_MEM_W = 104, OT_CODE_X = 436, OT_CODE_W = 104, OT_REBOOT_X = 546, OT_REBOOT_W = 74;
+static const int OT_MEM_X = 326, OT_MEM_W = 72, OT_CODE_X = 404, OT_CODE_W = 72, OT_REBOOT_X = 482, OT_REBOOT_W = 74, OT_SET_X = 562, OT_SET_W = 58;
 static const int FD_PREV_X = 512, FD_PREV_W = 52, FD_NEXT_X = 568, FD_NEXT_W = 52;
-enum { HIT_FD_INSERT = -2, HIT_FD_EJECT = -3, HIT_FD_NEXT = -4, HIT_FD_PREV = -5, HIT_REBOOT = -6, HIT_MEMEDIT = -7, HIT_FD_UNIT = -8, HIT_CODEEDIT = -9 };
+enum { HIT_FD_INSERT = -2, HIT_FD_EJECT = -3, HIT_FD_NEXT = -4, HIT_FD_PREV = -5, HIT_REBOOT = -6, HIT_MEMEDIT = -7, HIT_FD_UNIT = -8, HIT_CODEEDIT = -9, HIT_SETTINGS = -10 };
+// 画面＆サウンド設定の窓（settings.inc）
+namespace settingsdlg { static bool owns(const SDL_Event& e); static void on_event(SDL_Event& e); static void tick(); }
+static void open_settings();
 
 // フロッピーの小メニュー（win32 版のポップアップメニューの代わり）
 struct FdItem { std::string label; int id; bool enabled; std::string spec; };
@@ -572,10 +576,16 @@ static void menu_decide() {
 // 「その他」: プログラム再起動（PC-98 の電源を入れ直す。INI も読み直す）
 static bool reload_settings(PlayerSettings* out, std::string* err);
 static void apply_live_settings(const PlayerSettings& old_ps);
+static void do_reboot();
 static void menu_reboot() {
     if (!g_p) return;
     if (!ask_yes_no("プログラム再起動", "PC-98 を起動し直して、最初からやり直しますか？\n\n"
                     "ゲームでセーブしていない進行は失われます（ステートセーブは残ります）。", false)) return;
+    do_reboot();
+}
+// INI を読み直して起動し直す（確認は呼ぶ側で）
+static void do_reboot() {
+    if (!g_p) return;
     audio_flush();
     g_turbo = false;
     std::string err, rerr;
@@ -608,6 +618,7 @@ static int menu_hit(float lx, float ly) {
         if (lx >= OT_MEM_X && lx < OT_MEM_X + OT_MEM_W) return HIT_MEMEDIT;
         if (lx >= OT_CODE_X && lx < OT_CODE_X + OT_CODE_W) return HIT_CODEEDIT;
         if (lx >= OT_REBOOT_X && lx < OT_REBOOT_X + OT_REBOOT_W) return HIT_REBOOT;
+        if (lx >= OT_SET_X && lx < OT_SET_X + OT_SET_W) return HIT_SETTINGS;
     }
     if (g_disk_list.size() > 1 && ly >= FD_Y1 && ly < FD_Y1 + FD_H) {
         if (lx >= FD_PREV_X && lx < FD_PREV_X + FD_PREV_W) return HIT_FD_PREV;
@@ -683,9 +694,10 @@ static void draw_menu() {
         button(FD_INS_X, FD_Y, FD_INS_W, "F:入れる/実機");
         button(FD_EJ_X, FD_Y, FD_EJ_W, "E:取り出す");
         if (fd_two()) button(FD_UNIT_X, FD_Y, FD_UNIT_W, "D:ドライブ");
-        button(OT_MEM_X, FD_Y, OT_MEM_W, "M:メモリ編集");
-        button(OT_CODE_X, FD_Y, OT_CODE_W, "C:コード編集");
+        button(OT_MEM_X, FD_Y, OT_MEM_W, "M:メモリ");
+        button(OT_CODE_X, FD_Y, OT_CODE_W, "C:コード");
         button(OT_REBOOT_X, FD_Y, OT_REBOOT_W, "R:再起動");
+        button(OT_SET_X, FD_Y, OT_SET_W, "S:設定");
     }
     if (!g_menu_note.empty()) ov_text(0, 356, RGBA(255, 120, 120), ov_fit(g_menu_note, 636), 640);
     ov_text(0, 380, RGBA(170, 170, 185), "カーソル/マウス:選ぶ  Enter/左クリック:決定  Esc/右クリック:やめる", 640);
@@ -749,6 +761,7 @@ static void on_menu_key(SDL_Scancode sc, bool first) {
     case SDL_SCANCODE_P: if (first) fd_prev_disk(); return;
     case SDL_SCANCODE_D: if (first) fd_toggle_unit(); return;
     case SDL_SCANCODE_R: if (first) menu_reboot(); return;
+    case SDL_SCANCODE_S: if (first) open_settings(); return;
     case SDL_SCANCODE_M: if (first) { menu_close(); memedit::show(); } return;
     case SDL_SCANCODE_C: if (first) { menu_close(); codeedit::show(); } return;
     default: return;
@@ -759,6 +772,7 @@ static void on_menu_key(SDL_Scancode sc, bool first) {
 static void on_event(SDL_Event& e, bool& running) {
     if (memedit::owns(e)) { memedit::on_event(e); return; }   // メモリエディタの窓あての入力
     if (codeedit::owns(e)) { codeedit::on_event(e); return; }   // コードエディタの窓あての入力
+    if (settingsdlg::owns(e)) { settingsdlg::on_event(e); return; }   // 画面＆サウンド設定の窓あての入力
     if (e.type == g_ev_dialog) {
         std::string* path = (std::string*)e.user.data1;
         if (!path) return;
@@ -839,6 +853,7 @@ static void on_event(SDL_Event& e, bool& running) {
             else if (h == HIT_FD_PREV) fd_prev_disk();
             else if (h == HIT_FD_UNIT) fd_toggle_unit();
             else if (h == HIT_REBOOT) menu_reboot();
+            else if (h == HIT_SETTINGS) open_settings();
             else if (h == HIT_MEMEDIT) { menu_close(); memedit::show(); }
             else if (h == HIT_CODEEDIT) { menu_close(); codeedit::show(); }
             break;
@@ -929,6 +944,7 @@ static void write_template_ini(const std::string& path, const std::string& start
       << "; MIDI（MPU-PC98II, E0D0h）を載せる。ホストの MIDI 出力へ送るのは今は Windows だけ" << nl << "MIDI=0" << nl << "MidiDevice=-1" << nl
       << "; MIDI を SoundFont（.sf2）で鳴らす（どの OS でも。相対パスはゲームのフォルダから。空ならホストの MIDI 出力）" << nl << "MidiSoundFont=" << nl
       << "MidiSpeedFix=100" << nl
+      << "; 音源ボード・MIDI・音量・画面などは、ゲーム中に F11 →「S: 設定」でも変えられる（この INI に保存される）" << nl
       << "; 起動時に入れるフロッピーイメージ（D88 / FDI / NFD / ベタ / SCP / HFE）と、そのドライブ名。F11 の画面でも入れ替えられる" << nl
       << "; （FloppyDisk= は FloppyImage= と同じ。どちらで書いてもよい）" << nl
       << "FloppyDisk=" << nl << "FloppyDrive=B" << nl
@@ -1347,6 +1363,8 @@ static void build_disk_list() {
     }
 }
 
+#include "settings.inc"
+
 int main(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_APP_NAME, "PC98PLAYER");
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "512");
@@ -1447,6 +1465,7 @@ int main(int argc, char** argv) {
         double t = now();
         memedit::tick();
         codeedit::refresh();
+        settingsdlg::tick();
         if (g_paused_by_focus) { SDL_WaitEventTimeout(nullptr, 20); next = t; continue; }
         {   // メモリエディタを操作している間は止める（チェックが入っているとき）
             bool mp = memedit::pause_requested() || codeedit::pause_requested();
