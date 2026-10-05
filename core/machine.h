@@ -144,6 +144,7 @@ struct Config {
     char     floppy_drive = 'B';     // フロッピーのドライブ名
     char     floppy_drive2 = 0;      // 2 台目のフロッピーのドライブ名（0 = DOS からは見せない）
     char     current_drive = 0;      // 起動時のカレントドライブ（0 = Start= のドライブ、無ければゲームのドライブ）
+    std::string current_dir;         // 起動時のカレントディレクトリ（例 A:\NANPA\。空 = 指定なし）
     int      free_mb = 96;           // ゲームのドライブの空き容量として見せる大きさ（MB）
     int      fake_date = 0;          // 0 以外: YYYYMMDD。起動した日をこの日付として、以後は実時間で進める
     int      first_mcb = 0x0200;     // 先頭 MCB のセグメント（実機の DOS に近い位置へ）
@@ -270,6 +271,9 @@ struct Machine {
     int      quit;               // ゲームが終わった（シェルが最後まで行った）
     std::string status;
     unsigned unknown_io;
+    uint32_t fd_seen[2];     // フロッピーの入れ替えを見張る（floppy::change_count_unit の前回の値）
+    int32_t  fd_irq_wait[2]; // 入れ替えの割込みを出すまでの待ち（MASTER_CLOCK）
+    uint8_t  fd_irq_stage[2];// 2 = 抜いた割込みを出す / 1 = 入れた割込みを出す / 0 = なし
 };
 
 extern Machine* g_m;

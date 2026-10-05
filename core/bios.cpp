@@ -617,6 +617,13 @@ static void intdc(Machine* m) {
         default: return;
         }
     }
+    if (cl == 0x12) {
+        // MS-DOS の製品番号（拡張機能があるか）: AX に 0 以外を返す。0 だと古い DOS とみなして、
+        // ドライブの DA/UA 一覧を 0000:066Ch から直接読むソフトがある（同級生の INSTALL.EXE は、その道で
+        // DS を 0 にしたまま自分のデータ域を読み、DGROUP の先頭を壊して R6001 で終わる）
+        SETAX(m, 0x0001); SETDX(m, 0x0500);
+        return;
+    }
     if (cl == 0x13) {
         // ドライブの DA/UA 一覧（MS-DOS 5.0 以降）: DS:DX に 96 バイト
         //  +0: A-P の DA/UA（1 バイトずつ）, +1Ah: A-Z の {属性, DA/UA}（2 バイトずつ）
@@ -840,9 +847,10 @@ bool bios_boot_fd(Machine* m, std::string* why) {
         pos += n; remain -= n;
     }
     plog("[boot] IPL を %04X:0000 へ読み込みました（%s, N=%d, %s）\n", seg, fm ? "FM" : "MFM", N, im->path.c_str());
-    // PIC の初期マスク（キーボードとスレーブ連結だけ開ける）
+    // PIC の初期マスク（キーボードとスレーブ連結、それと FDC の 640KB/1MB（スレーブの IR2・IR3 = INT 41h・42h）を開ける。
+    // 実機の BIOS はフロッピーを割込みで動かすので FDC は開いたまま。ディスクの入れ替えの割込みを見るソフトがある）
     m->pic[0].imr = 0x7D;
-    m->pic[1].imr = 0xFF;
+    m->pic[1].imr = 0xF3;
     pic_update_hint(m);
     Cpu* c = &m->cpu;
     for (int i = 0; i < 8; i++) c->r[i] = 0;

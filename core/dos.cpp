@@ -2300,6 +2300,33 @@ void shell_start(Machine* m, const std::string& cmdline) {
             cl = "\\" + cl;
         }
     }
+    // CurrentDirectory=A:\NANPA\ : 起動時のカレントディレクトリ。「\NANPA から実行して下さい」という
+    // インストーラ向け。ドライブが付いていればカレントドライブにもする。ゲームのドライブなら無いフォルダは作る
+    if (!m->cfg.current_dir.empty()) {
+        std::string d = m->cfg.current_dir;
+        for (auto& ch : d) if (ch == '/') ch = '\\';
+        char dv = 0;
+        if (d.size() >= 2 && d[1] == ':') {
+            dv = d[0]; if (dv >= 'a' && dv <= 'z') dv = (char)(dv - 32);
+            d = d.substr(2);
+            if (drive_valid(m, dv)) s_curdrv = dv == m->cfg.drive ? 0 : dv;
+        }
+        if (d.empty() || d[0] != '\\') d = "\\" + d;
+        std::vector<std::string> comps; split_guest(d, comps, nullptr);
+        if (s_sg_drive == m->cfg.drive) {
+            for (size_t i = 1; i <= comps.size(); i++) {
+                bool ex; std::string h = host_of(m, comps, i, &ex);
+                if (!ex) { hostfs::mkdir(h); dir_invalidate(); }
+            }
+        }
+        bool ex; std::string h = host_of(m, comps, comps.size(), &ex);
+        HostDirEntry st;
+        if (ex && hostfs::stat(h, st) && st.is_dir) {
+            std::string s;
+            for (size_t i = 0; i < comps.size(); i++) { if (i) s += "\\"; s += comps[i]; }
+            cwd_of(m, s_sg_drive) = s;
+        }
+    }
     BatchCtx b;
     b.lines.push_back(cl);
     s_batch.clear();
@@ -2547,9 +2574,10 @@ void dos_init(Machine* m) {
         }
     }
 
-    // PIC の初期マスク（キーボードとスレーブ連結だけ開ける）
+    // PIC の初期マスク（キーボードとスレーブ連結、それと FDC の 640KB/1MB（スレーブの IR2・IR3 = INT 41h・42h）を開ける。
+    // 実機の BIOS はフロッピーを割込みで動かすので FDC は開いたまま。ディスクの入れ替えの割込みを見るソフトがある）
     m->pic[0].imr = 0x7D;
-    m->pic[1].imr = 0xFF;
+    m->pic[1].imr = 0xF3;
     pic_update_hint(m);
 
     shell_resume(m);

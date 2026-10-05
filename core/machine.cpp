@@ -3,6 +3,7 @@
 //  machine.cpp  --  仮想 PC-9801 のデバイスと時間軸
 // -----------------------------------------------------------------------------
 #include "machine.h"
+#include "floppy.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -182,7 +183,10 @@ static void pit_write(Machine* m, int ch, uint8_t v) {
     else t->reload = v;
     t->counter = t->reload;
     t->armed = 1;
-    if (ch == 1) m->beepw.push_back({m->ticks, 0x100000 | t->reload});   // 周波数変化（いつ変わったかも残す。BEEP の時分割和音のため）
+    // ブザー（ch1）: 周波数変化（いつ変わったかも残す。BEEP の時分割和音のため）。
+    // モード 0/1（ワンショット）は、書いた時から数え終わるまで出力が L になる。タイマ割込みのたびに
+    // 数を書き換えてパルス幅で音を出す「BEEP の PCM 再生」（ルパン９８ など）なので別の印で残す
+    if (ch == 1) m->beepw.push_back({m->ticks, ((t->mode == 0 || t->mode == 1) ? 0x200000 : 0x100000) | t->reload});
 }
 static uint8_t pit_read(Machine* m, int ch) {
     Pit* t = &m->pit[ch];
@@ -901,6 +905,22 @@ static void advance(Machine* m, uint32_t t) {
         }
     }
 
+    // フロッピーの入れ替え: 実機ではディスクを抜くと・入れると 1MB の FDC が「ドライブの準備が変わった」割込み
+    //（IRQ 11 = INT 13h）を出し、BIOS がその結果（ST0）をユニットごとの作業域 0564h+ユニット×8 に残す。
+    // 抜いたときは ST0 の bit3（準備できていない）が立つ。ELFDOS（同級生など）は INT 13h を横取りしてこれを見て、
+    // そのドライブの読み込みキャッシュを捨てる（見られないと、入れ替えた後も前のディスクの中身を使い続ける）
+    for (int u = 0; u < 2; u++) {
+        uint32_t c = floppy::change_count_unit(u);
+        if (c != m->fd_seen[u]) { m->fd_seen[u] = c; m->fd_irq_stage[u] = 2; m->fd_irq_wait[u] = 0; }
+        if (!m->fd_irq_stage[u]) continue;
+        m->fd_irq_wait[u] -= (int32_t)t;
+        if (m->fd_irq_wait[u] > 0) continue;
+        m->ram[0x564 + u * 8] = (uint8_t)((m->fd_irq_stage[u] == 2 ? 0xC8 : 0xC0) | u);
+        machine_raise_irq(m, 11);
+        m->fd_irq_stage[u]--;
+        m->fd_irq_wait[u] = (int32_t)(MASTER_CLOCK / 30);   // 抜いてから入れるまで少し間をあける
+    }
+
     // 垂直同期
     uint32_t before = m->frame_pos;
     m->frame_pos += t;
@@ -953,6 +973,7 @@ Machine* machine_create(const Config& cfg) {
     m->gdcm.csrform[0] = 0x0F;   // 16 ライン/行
     m->modeff[3] = 1;            // 高解像度（400 ライン）
     // 既定のデジタルパレット（0..7 がそのまま）
+    for (int u = 0; u < 2; u++) { m->fd_seen[u] = floppy::change_count_unit(u); m->fd_irq_stage[u] = 0; m->fd_irq_wait[u] = 0; }
     m->degpal[0] = 0x37; m->degpal[1] = 0x15; m->degpal[2] = 0x26; m->degpal[3] = 0x04;
     for (int i = 0; i < 16; i++) {
         m->pal[i][0] = (i & 4) ? 15 : 0;   // G

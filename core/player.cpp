@@ -19,6 +19,21 @@ static std::string trim(const std::string& s) {
     return s.substr(a, b - a);
 }
 
+// 0x80 以上のバイトを含み、正しい UTF-8 になっている（Shift_JIS のままならたいてい壊れた UTF-8 になる）
+static bool looks_utf8(const std::string& s) {
+    bool high = false;
+    for (size_t i = 0; i < s.size();) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) { i++; continue; }
+        high = true;
+        int n = (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : -1;
+        if (n < 0) return false;
+        for (int k = 1; k <= n; k++) { if (i + k >= s.size() || ((unsigned char)s[i + k] & 0xC0) != 0x80) return false; }
+        i += (size_t)n + 1;
+    }
+    return high;
+}
+
 bool Ini::load(const std::string& path) {
     void* h = hostfs::open(path, 0, false, false);
     if (!h) return false;
@@ -147,6 +162,9 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
         std::string cd = G("CURRENTDRIVE", "");
         ps->cfg.current_drive = cd.empty() ? 0 : (char)toupper((unsigned char)cd[0]);
         if (ps->cfg.current_drive < 'A' || ps->cfg.current_drive > 'Z') ps->cfg.current_drive = 0;
+        ps->cfg.current_dir = G("CURRENTDIRECTORY", "");   // 例 A:\NANPA\ （無ければゲームのフォルダの下に作る）
+        if (ps->cfg.current_dir.empty()) ps->cfg.current_dir = G("CURRENTDIR", "");
+        if (looks_utf8(ps->cfg.current_dir)) ps->cfg.current_dir = hostfs::to_sjis(ps->cfg.current_dir);
         int fm = I("FREESPACEMB", 96);
         ps->cfg.free_mb = fm < 1 ? 1 : fm > 1000 ? 1000 : fm;
     }
@@ -227,6 +245,9 @@ bool Player::init(const PlayerSettings& s, std::string* err) {
     }
     std::string cmd = ps.cfg.start;
     if (!ps.cfg.args.empty()) cmd += " " + ps.cfg.args;
+    // INI は UTF-8 にそろえて読んでいるので、ゲームに渡す前に Shift_JIS へ戻す
+    //（Args= の日本語が化けないように。ルパン９８ の「LUPIN おなかのラッパがプ～」など）
+    if (looks_utf8(cmd)) cmd = hostfs::to_sjis(cmd);
     shell_start(m, cmd);
     (void)err;
     return true;
@@ -286,13 +307,25 @@ void Player::run_frame(bool render_video, bool render_audio) {
             opna->write(m->regw[wi].part, m->regw[wi].addr, m->regw[wi].val);
             wi++;
         }
-        while (bi < m->beepw.size() && (double)m->beepw[bi].first <= ts) {
+        // ブザーの変化: この標本の区間 [ts, ts+step) の中の分まで進める。パルス幅（PWM）のときは、
+        // 区間の中で出力が L だった時間を正確に数えて、その割合を音の大きさにする
+        double pwm_low = 0, cur = ts, bnd = ts + step;
+        auto low_overlap = [&](double s, double e) { double x = std::max(s, pwm_lo_s), y = std::min(e, pwm_lo_e); return y > x ? y - x : 0.0; };
+        while (bi < m->beepw.size() && (double)m->beepw[bi].first < bnd) {
             int v = m->beepw[bi].second;
+            double te = std::max((double)m->beepw[bi].first, ts);
+            if (beep_pwm) pwm_low += low_overlap(cur, te);
+            cur = te;
             if (v == 0) beep_state = false;
             else if (v == 1) beep_state = true;
-            else if (v & 0x100000) beep_reload = (uint16_t)v;
+            else if (v & 0x200000) {
+                uint32_t cnt = (uint16_t)v; if (!cnt) cnt = 0x10000;
+                beep_pwm = true; pwm_lo_s = (double)m->beepw[bi].first; pwm_lo_e = pwm_lo_s + cnt * 4.0;   // PIT は MASTER_CLOCK/4
+            }
+            else if (v & 0x100000) { beep_reload = (uint16_t)v; beep_pwm = false; }
             bi++;
         }
+        if (beep_pwm) pwm_low += low_overlap(cur, bnd);
         float l = 0, r = 0;
         opna->render_one(&l, &r);
         // 音源（FM・SSG・リズム）の基準の大きさ。ymfm の出力をそのまま使うと、実曲のピークが
@@ -307,7 +340,14 @@ void Player::run_frame(bool render_video, bool render_audio) {
             if (n) { pcm_l = sl / n; pcm_r = sr / n; }
             l += pcm_l * pvol; r += pcm_r * pvol;
         }
-        if (beep_state) {
+        if (beep_pwm) {
+            // H の割合 → -1〜+1。直流分を取り除き（スピーカーは直流を鳴らさない）、高い方を少し丸める
+            float x = beep_state ? (float)(2.0 * pwm_low / step - 1.0) : 0.0f;   // L が長いほど大きい値（データの向きに合わせる）
+            float hp = x - pwm_x1 + 0.995f * pwm_y1; pwm_x1 = x; pwm_y1 = hp;
+            pwm_lp += (hp - pwm_lp) * 0.45f;
+            float b = pwm_lp * bvol * 2.0f;
+            l += b; r += b;
+        } else if (beep_state) {
             uint32_t rel = beep_reload ? beep_reload : 0x10000u;
             double f = (MASTER_CLOCK / 4.0) / rel;
             beep_phase += f / ps.sample_rate;
@@ -333,7 +373,7 @@ void Player::run_frame(bool render_video, bool render_audio) {
         sample_acc += step;
     }
     for (; wi < m->regw.size(); wi++) opna->write(m->regw[wi].part, m->regw[wi].addr, m->regw[wi].val);
-    for (; bi < m->beepw.size(); bi++) { int v = m->beepw[bi].second; if (v == 0) beep_state = false; else if (v == 1) beep_state = true; else if (v & 0x100000) beep_reload = (uint16_t)v; }
+    for (; bi < m->beepw.size(); bi++) { int v = m->beepw[bi].second; if (v == 0) beep_state = false; else if (v == 1) beep_state = true; else if (v & 0x200000) { uint32_t cnt = (uint16_t)v; if (!cnt) cnt = 0x10000; beep_pwm = true; pwm_lo_s = (double)m->beepw[bi].first; pwm_lo_e = pwm_lo_s + cnt * 4.0; } else if (v & 0x100000) { beep_reload = (uint16_t)v; beep_pwm = false; } }
     if (pi < m->pcm_out.size()) { pcm_l = m->pcm_out.back().l; pcm_r = m->pcm_out.back().r; }
     if (!(m->pcm86.ctrl & 0x80)) pcm_l = pcm_r = 0;
     m->pcm_out.clear();
@@ -377,7 +417,7 @@ bool Player::reboot(std::string* err) {
 bool Player::reboot(const PlayerSettings& s0, std::string* err) {
     PlayerSettings s = s0;
     shutdown();
-    sample_acc = 0; beep_phase = 0; beep_state = false; beep_reload = 998; pcm_l = pcm_r = 0;
+    sample_acc = 0; beep_phase = 0; beep_state = false; beep_reload = 998; beep_pwm = false; pwm_lo_s = pwm_lo_e = 0; pwm_x1 = pwm_y1 = pwm_lp = 0; pcm_l = pcm_r = 0;
     floppy_error.clear();
     return init(s, err);
 }

@@ -55,6 +55,9 @@ struct Player {
     double beep_phase = 0;
     bool   beep_state = false;
     uint16_t beep_reload = 998;   // ブザーの音程（PIT ch1 の値。フレームの途中の変化も追う）
+    bool   beep_pwm = false;      // ブザーをパルス幅で鳴らしている（PIT ch1 がワンショット）
+    double pwm_lo_s = 0, pwm_lo_e = 0;   // 出力が L の区間（MASTER_CLOCK の時刻）
+    float  pwm_x1 = 0, pwm_y1 = 0, pwm_lp = 0;
     int32_t pcm_l = 0, pcm_r = 0;   // PCM86 の直前の標本
     // MIDI の出口（ホストが設定）。完結したメッセージ（SysEx は F0..F7 まるごと）を渡す
     void (*midi_sink)(void* user, const uint8_t* msg, int len) = nullptr;

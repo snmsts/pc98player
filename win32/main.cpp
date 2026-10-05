@@ -32,6 +32,8 @@
 #include "../core/floppy.h"
 #include "../core/fdreal.h"
 #include "../core/hdimage.h"
+#include "../core/opna_renderer.h"
+#include "ini_rewrite.h"
 #include <algorithm>
 
 
@@ -428,10 +430,14 @@ static const int FD_INS_X = 30, FD_INS_W = 156, FD_EJ_X = 194, FD_EJ_W = 110;
 static const int FD_PN_Y = FD_BOX_Y + 5, FD_PN_H = 18;         // 前／次のディスク（見出しの段の右）
 static const int FD_PREV_X = 196, FD_PREV_W = 56, FD_NEXT_X = 256, FD_NEXT_W = 54;
 static const int OT_BOX_X = 324;                               // 「その他」の欄の左端
-static const int OT_REBOOT_X = 334, OT_REBOOT_W = 156;         // ボタン（ボタンを増やすときは同じ段の右や上の段へ）
+static const int OT_REBOOT_X = 334, OT_REBOOT_W = 128;         // ボタン（ボタンを増やすときは同じ段の右や上の段へ）
+static const int OT_SET_X = 468, OT_SET_W = 144;               // 画面＆サウンド設定（再起動の右）
 static const int OT_MEM_X = 334, OT_MEM_W = 136, OT_MEM_Y = FD_Y - 28;   // メモリエディタ（再起動の上の段）
 static const int OT_CODE_X = 476, OT_CODE_W = 136;                         // コードエディタ（メモリエディタの右）
-enum { HIT_FD_INSERT = -2, HIT_FD_EJECT = -3, HIT_FD_NEXT = -4, HIT_FD_PREV = -5, HIT_REBOOT = -6, HIT_MEMEDIT = -7, HIT_FD_UNIT = -8, HIT_CODEEDIT = -9 };
+enum { HIT_FD_INSERT = -2, HIT_FD_EJECT = -3, HIT_FD_NEXT = -4, HIT_FD_PREV = -5, HIT_REBOOT = -6, HIT_MEMEDIT = -7, HIT_FD_UNIT = -8, HIT_CODEEDIT = -9, HIT_SETTINGS = -10 };
+// 画面＆サウンド設定の窓（settings.inc）
+namespace settingsdlg { static HWND s_wnd = nullptr; static void open(); }
+static void open_settings();
 static std::vector<std::wstring> g_disk_list;   // まとめて渡されたフロッピーイメージ（「次のディスク」で順に入れ替える）
 static int g_disk_index = 0;
 // ブートモード（フロッピーから起動するゲーム）はドライブが 2 台。F11 の画面の操作は g_fd_unit のドライブに対して行う
@@ -682,10 +688,16 @@ static void apply_live_settings(const PlayerSettings& old_ps);
 
 // 「その他」: プログラム再起動（PC-98 の電源を入れ直す）
 static void audio_flush();
+static void do_reboot();
 static void menu_reboot() {
     if (!g_p) return;
     if (MessageBoxW(g_hwnd, L"PC-98 を起動し直して、最初からやり直しますか？\n\nゲームでセーブしていない進行は失われます（ステートセーブは残ります）。",
                     L"プログラム再起動", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+    do_reboot();
+}
+// INI を読み直して起動し直す（確認は呼ぶ側で）
+static void do_reboot() {
+    if (!g_p) return;
     audio_flush();
     midi_all_off();
     g_turbo = false;
@@ -728,6 +740,7 @@ static int menu_hit(int x, int y) {
         if (lx >= FD_INS_X && lx < FD_INS_X + FD_INS_W) return HIT_FD_INSERT;
         if (lx >= FD_EJ_X && lx < FD_EJ_X + FD_EJ_W) return HIT_FD_EJECT;
         if (lx >= OT_REBOOT_X && lx < OT_REBOOT_X + OT_REBOOT_W) return HIT_REBOOT;
+        if (lx >= OT_SET_X && lx < OT_SET_X + OT_SET_W) return HIT_SETTINGS;
     }
     if (ly >= OT_MEM_Y && ly < OT_MEM_Y + FD_H && lx >= OT_MEM_X && lx < OT_MEM_X + OT_MEM_W) return HIT_MEMEDIT;
     if (ly >= OT_MEM_Y && ly < OT_MEM_Y + FD_H && lx >= OT_CODE_X && lx < OT_CODE_X + OT_CODE_W) return HIT_CODEEDIT;
@@ -856,7 +869,8 @@ static void draw_menu(HDC dc, int dx, int dy, int dw, int dh) {
         draw_text(dc, X(OT_BOX_X + 10), Y(FD_BOX_Y + 8), S(14), RGB(255, 230, 150), L"その他", false, 0);
         button(OT_MEM_X, OT_MEM_Y, OT_MEM_W, FD_H, 13, L"M: メモリエディタ");
         button(OT_CODE_X, OT_MEM_Y, OT_CODE_W, FD_H, 13, L"C: コードエディタ");
-        button(OT_REBOOT_X, FD_Y, OT_REBOOT_W, FD_H, 13, L"R: プログラム再起動");
+        button(OT_REBOOT_X, FD_Y, OT_REBOOT_W, FD_H, 12, L"R: プログラム再起動");
+        button(OT_SET_X, FD_Y, OT_SET_W, FD_H, 12, L"S: 画面＆サウンド設定");
     }
     if (!g_menu_note.empty())
         draw_text(dc, X(0), Y(356), S(15), RGB(255, 120, 120), g_menu_note, true, S(640));
@@ -944,7 +958,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_mouse_shared && g_mouse_btn) { g_mouse_btn = 0; if (g_p) machine_mouse(g_p->m, 0, 0, 0); }
             // 離した瞬間に押しっぱなしのキーが残らないよう全部離す
             if (g_p) for (int k = 0; k < 128; k++) if (g_p->m->kb_down[k]) machine_key(g_p->m, (uint8_t)k, false);
-            if (g_pause_inactive) g_paused_by_focus = true;
+            // 画面＆サウンド設定の窓へ移ったときは止めない（音量を聞きながら変えられるように）
+            if (g_pause_inactive && !(settingsdlg::s_wnd && (HWND)lp == settingsdlg::s_wnd)) g_paused_by_focus = true;
         } else g_paused_by_focus = false;
         return 0;
     case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_KEYUP: case WM_SYSKEYUP: {
@@ -972,6 +987,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             case 'P': if (first) fd_prev_disk(); return 0;
             case 'D': if (first) fd_toggle_unit(); return 0;
             case 'R': if (first) menu_reboot(); return 0;
+            case 'S': if (first) open_settings(); return 0;
             case 'M': if (first) { menu_close(); memedit::show(GetModuleHandleW(nullptr)); } return 0;
             case 'C': if (first) { menu_close(); codeedit::show(GetModuleHandleW(nullptr)); } return 0;
             default: return 0;
@@ -1010,6 +1026,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             else if (hit == HIT_FD_PREV) fd_prev_disk();
             else if (hit == HIT_FD_UNIT) fd_toggle_unit();
             else if (hit == HIT_REBOOT) menu_reboot();
+            else if (hit == HIT_SETTINGS) open_settings();
             else if (hit == HIT_MEMEDIT) { menu_close(); memedit::show(GetModuleHandleW(nullptr)); }
             else if (hit == HIT_CODEEDIT) { menu_close(); codeedit::show(GetModuleHandleW(nullptr)); }
             return 0;
@@ -1134,6 +1151,8 @@ static void write_template_ini(const std::wstring& path, const std::string& star
         "MidiDevice=-1\r\n"
         "; MIDI の演奏速度（%）。MIDI だけ遅いときに 120〜150 などへ上げる（MPU のテンポで演奏するドライバに効く）\r\n"
         "MidiSpeedFix=100\r\n"
+        "; 音源ボード・MIDI・音量・画面などは、ゲーム中に F11 →「S: 画面＆サウンド設定」でも変えられる（この INI に保存される）\r\n"
+        "MidiSpeedFix=100\r\n"
         "; 起動時に入れるフロッピーイメージ（D88 / FDI / NFD / ベタ / SCP / HFE）と、そのドライブ名。F11 の画面でも入れ替えられる\r\n"
         "; 実機のドライブも使える: FDD:A（USB フロッピー）, GW または GW:COM5（Greaseweazle）\r\n"
         "; （FloppyDisk= は FloppyImage= と同じ。どちらで書いてもよい）\r\n"
@@ -1144,6 +1163,8 @@ static void write_template_ini(const std::wstring& path, const std::string& star
         "GWRevs=3\r\n"
         "; 起動時のカレントドライブ（空なら Start= のドライブ）と、ゲームのドライブの空き容量として見せる大きさ（MB）\r\n"
         "CurrentDrive=\r\n"
+        "; 起動時のカレントディレクトリ（例 A:\\NANPA\\。ゲームのドライブに無ければ作る。空なら指定なし）\r\n"
+        "CurrentDirectory=\r\n"
         "FreeSpaceMB=96\r\n"
         "; EMS（EMM386 相当, ページフレーム D000h）と XMS（HIMEM.SYS 相当）。0 で無し\r\n"
         "EMS=1\r\n"
@@ -1159,6 +1180,7 @@ static void write_template_ini(const std::wstring& path, const std::string& star
         "Volume=100\r\n"
         "FMVolume=100\r\n"
         "SSGVolume=100\r\n"
+        "PCMVolume=100\r\n"
         "BeepVolume=50\r\n"
         "; マウスの速さ（%）\r\n"
         "MouseSpeed=100\r\n"
@@ -1500,6 +1522,8 @@ static void apply_live_settings(const PlayerSettings& o) {
     if (g_reload_codeedit && !(codeedit::s_wnd && IsWindowVisible(codeedit::s_wnd))) { codeedit::show(GetModuleHandleW(nullptr)); SetForegroundWindow(g_hwnd); }
 }
 
+#include "settings.inc"
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
     SetProcessDPIAware();
     timeBeginPeriod(1);
@@ -1743,6 +1767,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int show) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { running = false; break; }
+            if (settingsdlg::s_wnd && IsDialogMessageW(settingsdlg::s_wnd, &msg)) continue;   // Tab で項目を移る
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
