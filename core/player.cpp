@@ -300,6 +300,18 @@ void Player::run_frame(bool render_video, bool render_audio) {
     float vol = ps.volume / 100.0f;
     float pvol = ps.pcm_volume / 100.0f * (m->pcm86.vol / 15.0f) * 0.6f / 32768.0f;
     float bvol = ps.beep_volume / 100.0f * 0.15f;
+    {   // PCM86 のローパスの係数（標本化周波数が変わったときだけ作り直す）
+        static const uint32_t rates[8] = {44100, 33075, 22050, 16538, 11025, 8269, 5513, 4134};
+        int key = (int)(m->pcm86.ctrl & 7) * 1000000 + ps.sample_rate;
+        if (key != pcm_lp_key) {
+            pcm_lp_key = key;
+            double fc = std::min(rates[m->pcm86.ctrl & 7] * 0.45, ps.sample_rate * 0.45);
+            double w = tan(3.14159265358979 * fc / ps.sample_rate), q = 0.70710678;
+            double nrm = 1.0 / (1.0 + w / q + w * w);
+            pcm_b0 = (float)(w * w * nrm); pcm_b1 = 2 * pcm_b0; pcm_b2 = pcm_b0;
+            pcm_a1 = (float)(2.0 * (w * w - 1.0) * nrm); pcm_a2 = (float)((1.0 - w / q + w * w) * nrm);
+        }
+    }
     while (render_audio) {
         double ts = (double)t0 + sample_acc;
         if (ts >= (double)t1) break;
@@ -318,6 +330,9 @@ void Player::run_frame(bool render_video, bool render_audio) {
             cur = te;
             if (v == 0) beep_state = false;
             else if (v == 1) beep_state = true;
+            else if (v & 0x400000) {   // ch1 の制御語: 数を書くまで出力は L（モード 0/1）か H のまま＝鳴らない
+                beep_pwm = true; pwm_lo_s = (double)m->beepw[bi].first; pwm_lo_e = (v & 1) ? 1e300 : pwm_lo_s;
+            }
             else if (v & 0x200000) {
                 uint32_t cnt = (uint16_t)v; if (!cnt) cnt = 0x10000;
                 beep_pwm = true; pwm_lo_s = (double)m->beepw[bi].first; pwm_lo_e = pwm_lo_s + cnt * 4.0;   // PIT は MASTER_CLOCK/4
@@ -338,7 +353,19 @@ void Player::run_frame(bool render_video, bool render_audio) {
             int n = 0; int32_t sl = 0, sr = 0;
             while (pi < m->pcm_out.size() && (double)m->pcm_out[pi].tick <= ts) { sl += m->pcm_out[pi].l; sr += m->pcm_out[pi].r; n++; pi++; }
             if (n) { pcm_l = sl / n; pcm_r = sr / n; }
-            l += pcm_l * pvol; r += pcm_r * pvol;
+        }
+        {
+            // 標本化周波数（最大 44.1kHz、多くは 8〜16kHz）の階段のままだと、折り返しの像が
+            // 「シャリシャリ」した雑音に聞こえる。実機のボードの出力フィルタの代わりに、
+            // 標本化周波数の 0.45 倍で切る 2 次のローパス（バターワース）を通す
+            float xl = pcm_l * pvol, xr = pcm_r * pvol;
+            float yl = pcm_b0 * xl + pcm_b1 * pcm_xl1 + pcm_b2 * pcm_xl2 - pcm_a1 * pcm_yl1 - pcm_a2 * pcm_yl2;
+            float yr = pcm_b0 * xr + pcm_b1 * pcm_xr1 + pcm_b2 * pcm_xr2 - pcm_a1 * pcm_yr1 - pcm_a2 * pcm_yr2;
+            pcm_xl2 = pcm_xl1; pcm_xl1 = xl; pcm_yl2 = pcm_yl1; pcm_yl1 = yl;
+            pcm_xr2 = pcm_xr1; pcm_xr1 = xr; pcm_yr2 = pcm_yr1; pcm_yr1 = yr;
+            if (fabsf(yl) < 1e-9f) yl = 0;
+            if (fabsf(yr) < 1e-9f) yr = 0;
+            l += yl; r += yr;
         }
         if (beep_pwm) {
             // H の割合 → -1〜+1。直流分を取り除き（スピーカーは直流を鳴らさない）、高い方を少し丸める
@@ -373,7 +400,7 @@ void Player::run_frame(bool render_video, bool render_audio) {
         sample_acc += step;
     }
     for (; wi < m->regw.size(); wi++) opna->write(m->regw[wi].part, m->regw[wi].addr, m->regw[wi].val);
-    for (; bi < m->beepw.size(); bi++) { int v = m->beepw[bi].second; if (v == 0) beep_state = false; else if (v == 1) beep_state = true; else if (v & 0x200000) { uint32_t cnt = (uint16_t)v; if (!cnt) cnt = 0x10000; beep_pwm = true; pwm_lo_s = (double)m->beepw[bi].first; pwm_lo_e = pwm_lo_s + cnt * 4.0; } else if (v & 0x100000) { beep_reload = (uint16_t)v; beep_pwm = false; } }
+    for (; bi < m->beepw.size(); bi++) { int v = m->beepw[bi].second; if (v == 0) beep_state = false; else if (v == 1) beep_state = true; else if (v & 0x400000) { beep_pwm = true; pwm_lo_s = (double)m->beepw[bi].first; pwm_lo_e = (v & 1) ? 1e300 : pwm_lo_s; } else if (v & 0x200000) { uint32_t cnt = (uint16_t)v; if (!cnt) cnt = 0x10000; beep_pwm = true; pwm_lo_s = (double)m->beepw[bi].first; pwm_lo_e = pwm_lo_s + cnt * 4.0; } else if (v & 0x100000) { beep_reload = (uint16_t)v; beep_pwm = false; } }
     if (pi < m->pcm_out.size()) { pcm_l = m->pcm_out.back().l; pcm_r = m->pcm_out.back().r; }
     if (!(m->pcm86.ctrl & 0x80)) pcm_l = pcm_r = 0;
     m->pcm_out.clear();
@@ -417,7 +444,7 @@ bool Player::reboot(std::string* err) {
 bool Player::reboot(const PlayerSettings& s0, std::string* err) {
     PlayerSettings s = s0;
     shutdown();
-    sample_acc = 0; beep_phase = 0; beep_state = false; beep_reload = 998; beep_pwm = false; pwm_lo_s = pwm_lo_e = 0; pwm_x1 = pwm_y1 = pwm_lp = 0; pcm_l = pcm_r = 0;
+    sample_acc = 0; beep_phase = 0; beep_state = false; beep_reload = 998; beep_pwm = false; pwm_lo_s = pwm_lo_e = 0; pwm_x1 = pwm_y1 = pwm_lp = 0; pcm_l = pcm_r = 0; pcm_xl1 = pcm_xl2 = pcm_yl1 = pcm_yl2 = pcm_xr1 = pcm_xr2 = pcm_yr1 = pcm_yr2 = 0;
     floppy_error.clear();
     return init(s, err);
 }

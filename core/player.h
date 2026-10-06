@@ -59,6 +59,9 @@ struct Player {
     double pwm_lo_s = 0, pwm_lo_e = 0;   // 出力が L の区間（MASTER_CLOCK の時刻）
     float  pwm_x1 = 0, pwm_y1 = 0, pwm_lp = 0;
     int32_t pcm_l = 0, pcm_r = 0;   // PCM86 の直前の標本
+    int    pcm_lp_key = -1;          // PCM86 のローパス（標本化周波数ごとに係数を作る）
+    float  pcm_b0 = 1, pcm_b1 = 0, pcm_b2 = 0, pcm_a1 = 0, pcm_a2 = 0;
+    float  pcm_xl1 = 0, pcm_xl2 = 0, pcm_yl1 = 0, pcm_yl2 = 0, pcm_xr1 = 0, pcm_xr2 = 0, pcm_yr1 = 0, pcm_yr2 = 0;
     // MIDI の出口（ホストが設定）。完結したメッセージ（SysEx は F0..F7 まるごと）を渡す
     void (*midi_sink)(void* user, const uint8_t* msg, int len) = nullptr;
     void* midi_user = nullptr;
