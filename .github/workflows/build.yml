@@ -40,7 +40,7 @@ jobs:
           name: PC98PLAYER-${{ matrix.tag }}
           path: out/dist/PC98PLAYER-${{ matrix.tag }}.${{ matrix.pkg }}
 
-  # Windows は本家の Win32（GDI）版を MSVC で
+  # Windows は本家の Win32（GDI）版を MSVC で。x64 は本家が配っているので、ビルドが通るかを見るだけで配布物にはしない
   windows:
     strategy:
       fail-fast: false
@@ -54,11 +54,13 @@ jobs:
       - run: cmake -S . -B build -A ${{ matrix.arch }}
       - run: cmake --build build --config Release
       - name: Package
+        if: matrix.arch == 'ARM64'
         shell: bash
         run: |
           mkdir -p dist
           cp -R build/Release/PC98PLAYER.exe README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual 設定INI作成.html dist/
       - uses: actions/upload-artifact@v7
+        if: matrix.arch == 'ARM64'
         with:
           name: PC98PLAYER-windows-${{ matrix.arch }}
           path: dist/
