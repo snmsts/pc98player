@@ -111,11 +111,32 @@ void bios_key_irq(Machine* m) {
         return;
     }
     if (brk) return;
-    uint8_t ch = 0;
-    if (sc < 0x60) ch = (sh & 1) ? k_shift[sc] : k_norm[sc];
-    if ((sh & 0x02) && ch >= 'a' && ch <= 'z') ch = (uint8_t)(ch - 0x20);   // CAPS
-    if ((sh & 0x10) && ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'))) ch = (uint8_t)((ch & 0x1F));
-    kb_push(m, (uint16_t)((sc << 8) | ch));
+    // キーバッファに積むコード（AH = キーコード, AL = 文字コード）。実機の BIOS と同じく、
+    // ・カーソル・ROLL UP/DOWN・INS・DEL・HELP は文字コード 0（AX=3A00h など）。
+    //   （0Bh・0Ah などへの置き換えは MS-DOS の CON がキーコードを見て行う。BIOS で文字コードを付けると、
+    //    INT 18h AH=00h で AX=3A00h などと比べるソフトで矢印キーが効かない）
+    // ・XFER・NFER・HOME/CLR・f･1〜f･10 は AH だけ（SHIFT・CTRL で AH が変わる）、AL = 0。
+    // ・vf･1〜vf･5 など、コードの無いキーと STOP・COPY は積まない
+    bool shift = (sh & 0x01) != 0, ctrl = (sh & 0x10) != 0;
+    uint16_t code;
+    if (sc == 0x35 || sc == 0x51) {                         // XFER / NFER
+        uint8_t base = sc == 0x35 ? 0x35 : 0x51;
+        code = (uint16_t)((ctrl ? (base == 0x35 ? 0xB5 : 0xB1) : shift ? (base == 0x35 ? 0xA5 : 0xA1) : base) << 8);
+    } else if (sc == 0x3E) {                                // HOME/CLR（SHIFT で CLR = AEh）
+        if (ctrl) return;
+        code = shift ? 0xAE00 : 0x3E00;
+    } else if (sc >= 0x36 && sc <= 0x3F) {                  // ROLL UP/DOWN・INS・DEL・矢印・HELP
+        code = (uint16_t)(sc << 8);
+    } else if (sc >= 0x62 && sc <= 0x6B) {                  // f･1〜f･10（SHIFT +20h、CTRL +30h）
+        code = (uint16_t)((sc + (ctrl ? 0x30 : shift ? 0x20 : 0)) << 8);
+    } else if (sc < 0x52) {
+        uint8_t ch = shift ? k_shift[sc] : k_norm[sc];
+        if (sc == 0x33 && !shift) return;                   // 「＿」のキーは SHIFT なしではコード無し
+        if ((sh & 0x02) && ch >= 'a' && ch <= 'z') ch = (uint8_t)(ch - 0x20);   // CAPS
+        if (ctrl && ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '@' && ch <= '_'))) ch = (uint8_t)(ch & 0x1F);
+        code = (uint16_t)((sc << 8) | ch);
+    } else return;                                          // vf･1〜vf･5・STOP・COPY など
+    kb_push(m, code);
 }
 
 // ---- コンソール（MS-DOS の CON）-------------------------------------------------
@@ -428,6 +449,10 @@ static void int18(Machine* m) {
         }
         m->gfx_color = (ch & 0x20) ? 0 : 1;
         m->disp_bank = (ch >> 4) & 1;
+        // GDC 5MHz の機械（0054Dh bit5）では、400 ライン表示にするとグラフィック GDC を 5MHz にし（bit2、PITCH 80 バイト）、
+        // 200 ライン表示に戻すと 2.5MHz（PITCH 40 ワード）に戻す
+        if (mode == 3 && (m->ram[0x54D] & 0x24) == 0x20) { m->ram[0x54D] |= 0x04; m->gdc_clk5 = 1; m->gdcs.pitch = 80; }
+        else if (mode != 3 && (m->ram[0x54D] & 0x24) == 0x24) { m->ram[0x54D] &= (uint8_t)~0x04; m->gdc_clk5 = 0; m->gdcs.pitch = 40; }
         return; }
     case 0x43: {   // パレット（デジタル）
         uint32_t a = lin(m->cpu.sr[DS_], BX(m));
@@ -750,7 +775,7 @@ void bios_init(Machine* m) {
     r[0x501] = 0x80 | 0x04;         // 8MHz 系, メモリ 640KB
     r[0x53C] = 0x00;
     r[0x54C] = 0x4E;                // 16 色ボードあり 等
-    r[0x54D] = 0x40;                // EGC あり
+    r[0x54D] = (uint8_t)(0x40 | (m->cfg.gdc_5mhz ? 0x20 : 0x00));   // EGC あり / bit5 = GDC 5MHz を使える（DIP SW 2-8）/ bit2 = いま 5MHz
     r[0x480] = 0x00;
     r[0x481] = 0x00;
     r[0x458] = 0x00;

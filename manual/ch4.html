@@ -83,6 +83,7 @@ FakeDate=1999/12/31    ; 起動した日を 1999 年 12 月 31 日にする（�
 <ul>
   <li><strong>文字化け・字が欠ける:</strong> <code>KanjiJIS=83</code> を試します。<code>PC98PLAYER.EXE --fontsheet</code> で字形の一覧（PC98FONT.BMP）を確認できます。</li>
   <li><strong>縦縞や余計な模様が出る・一部が隠れない:</strong> 画面の組み合わせ（テキストとグラフィックの重ね方）の問題です。ステートセーブでその場面を保存し、スロットのファイルを報告に添えてください。</li>
+  <li><strong>「GDC のクロックを 5MHz（2.5MHz）にしてください」と出る・グラフィックが横に崩れる（2 倍に伸びる・半分に詰まる）:</strong> <code>GDCClock=5</code>（または <code>2.5</code>）に切り替えます。F11 →「S: 画面＆サウンド設定」の「GDC クロック」でも変えられます（プログラム再起動で反映）。</li>
   <li><strong>動きが速すぎる／遅すぎる:</strong> <code>CpuMHz=</code> を調整します。</li>
   <li><strong>ぼやける／ドットが粗い:</strong> <code>Smooth=</code> と <code>Scale=</code> で調整します。</li>
 </ul>

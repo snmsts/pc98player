@@ -130,6 +130,7 @@ const SCHEMA = [
     { key: "Font", label: "漢字のフォント", type: "text", def: "ＭＳ ゴシック", help: "漢字の字形を作るもとにする Windows のフォント。" },
     { key: "FontShift", label: "半角の左端を空ける", type: "check", def: "1", on: "1", off: "0", text: "実機の ROM と同じく左端の列を空ける",
       help: "半角を太字にして描くソフト（MIMPI V4 の曲名など）で線が点線のように崩れるのを防ぎます。" },
+    { key: "GDCClock", label: "GDC クロック", type: "radio", def: "2.5", options: [["2.5","2.5MHz"],["5","5MHz"]], help: "実機の DIP SW 2-8。「GDC を 5MHz（または 2.5MHz）にしてください」と出るソフトや、画面が崩れるソフトで切り替えます。5MHz にすると、400 ライン表示にしたときグラフィック GDC が 5MHz で動きます。" },
     { key: "KanjiJIS", label: "漢字の並び", type: "radio", def: "78", options: [["78","旧 JIS（PC-98 と同じ）"],["83","新 JIS"]] },
   ]},
   { title: "CPU・メモリ・DOS", items: [

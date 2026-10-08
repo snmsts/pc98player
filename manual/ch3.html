@@ -166,7 +166,7 @@
   <li><strong>F11 の画面から:</strong> 「フロッピー」の欄の <kbd>F</kbd>（入れる／実機…）のメニューに、見つかった USB フロッピードライブ（「USB フロッピー A:（1.25MB 対応）」など）と Greaseweazle が出るので選びます。インストールアシスタント以外で使うときは、ディスクを入れ替えたら同じメニューの「読み直す」を選んでください。</li>
   <li><strong>INI で:</strong> <code>FloppyDisk=FDD:A</code>（Windows のフロッピードライブ A:。<code>\\.\A:</code> とも書けます）、<code>FloppyDisk=GW</code>（Greaseweazle を USB の ID で探します。見つからないときは <code>GW:COM5</code> のようにポートを指定）。<code>FloppyDisk=</code> は <code>FloppyImage=</code> と同じ意味で、どちらで書いても構いません。</li>
   <li><strong>Greaseweazle の設定:</strong> <code>GWDrive=A</code>（PC のケーブルのドライブ A / B。Shugart 接続なら 0 / 1 / 2）、<code>GWRevs=3</code>（1 トラックを何回転ぶん読むか。1〜8。多いほど読みにくいディスクに強く、遅くなります）。</li>
-  <li><strong>イメージとして残す:</strong> メニューの「今のディスクを D88 で保存」で、全トラックを読んで D88 に書き出せます（ID・CRC エラー・デリーテッドデータは残ります。読むたびに変わるセクタは 1 回分だけ）。次からはそのイメージを使えば本物のドライブが要りません。</li>
+  <li><strong>イメージとして残す:</strong> メニューの「今のディスクを D88 で保存」で、全トラックを読んで D88 に書き出せます（ID・CRC エラー・デリーテッドデータは残ります。読むたびに変わるセクタは 1 回分だけ）。次からはそのイメージを使えば本物のドライブが要りません。例: <code>samples\slayers.INI</code>（スレイヤーズ！のキーディスクを Greaseweazle で吸い出して使う）。</li>
 </ul>
 <div class="warn"><strong>注意:</strong><br>
 ・USB フロッピーへの書き込みは、Windows からそのドライブを一時的に切り離せた（ボリュームをロックできた）ときだけ行います。できないときは書き込み禁止のディスクとして扱います。ドライブを開けないときは「管理者として実行」すると開ける場合があります。<br>

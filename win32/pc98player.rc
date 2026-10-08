@@ -1,8 +1,9 @@
 #include <winver.h>
+#include "version.h"
 1 ICON "pc98player.ico"
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,1,0,0
- PRODUCTVERSION 1,1,0,0
+ FILEVERSION PC98P_VER_Y,PC98P_VER_M,PC98P_VER_D,0
+ PRODUCTVERSION PC98P_VER_Y,PC98P_VER_M,PC98P_VER_D,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -15,12 +16,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "PC98PLAYER project"
       VALUE "FileDescription", "PC98PLAYER - PC-9801 game player"
-      VALUE "FileVersion", "1.1.0.0"
+      VALUE "FileVersion", "ver " PC98P_VER_STR
       VALUE "InternalName", "PC98PLAYER"
       VALUE "LegalCopyright", "MIT License"
       VALUE "OriginalFilename", "PC98PLAYER.EXE"
       VALUE "ProductName", "PC98PLAYER"
-      VALUE "ProductVersion", "1.1.0.0"
+      VALUE "ProductVersion", "ver " PC98P_VER_STR
     END
   END
   BLOCK "VarFileInfo"

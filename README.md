@@ -99,6 +99,7 @@ GWRevs=3             ; Greaseweazle で 1 トラックを何回転読むか（1�
 FloppyDrive=B        ; フロッピーのドライブ名（A〜Z。Drive=B と FloppyDrive=A で入れ替えも可）。Start=B:\INSTALL.BAT のようにも書ける
 CurrentDrive=        ; 起動時のカレントドライブ（空 = Start= のドライブ）
 CurrentDirectory=    ; 起動時のカレントディレクトリ（例 A:\NANPA\。無ければ作る）
+GDCClock=2.5         ; グラフィック GDC のクロック（DIP SW 2-8）。2.5 / 5
 FreeSpaceMB=96       ; ゲームのドライブの空き容量として見せる大きさ（MB）
 MidiSpeedFix=100     ; MIDI の演奏速度 %（10〜1000。MPU のテンポ＝クロック・トゥ・ホストだけを速める）
 EMS=1                ; EMS（EMM386 相当）。EMSKB=4096 で容量
@@ -130,7 +131,7 @@ JoyRapid=4           ; 連射の速さ（何フレームごとに切り替える
 
 INI を書き換えたら、**F11 → R（プログラム再起動）** で INI を読み直して起動し直します（PC98PLAYER を閉じずに設定を試せます。FloppyDisk= / FloppyImage= は変えたときだけ入れ替え）。
 
-INI は Shift_JIS でも UTF-8 でも構いません。`samples\` に例があります（ランス３の 2 ドライブ構成は `rance3.INI`）。
+INI は Shift_JIS でも UTF-8 でも構いません。`samples\` に例があります（ランス３の 2 ドライブ構成は `rance3.INI`、Greaseweazle で吸い出したキーディスクを使うスレイヤーズ！は `slayers.INI`）。
 
 ## 操作
 
@@ -197,6 +198,7 @@ PC-98 の漢字 ROM・ANK ROM を、**本物の ROM も第三者のビットマ�
 | 痕（Leaf, 1996） | KIZU.BAT | オープニングの月の場面で、雲を EGC（CPU 転送元・4A4h=1500h・シフトを毎フレーム変える）でプレーンごとに描いて流す |
 | Dante98（ログイン ディスク＆ブック） | AUTOEXEC.BAT | MUSIC.COM（FM 音源ドライバ）が「INT 48h のセグメントが 0060h なら未登録、INT 0Ah と同じなら常駐済み」で判断する。使っていない割込みベクタを実機の MS-DOS と同じ 0060:xxxx の IRET にして、常駐できるように（マニュアルの「サウンド BIOS を切り離す」はもともとその状態） |
 | スレイヤーズ！（バンプレスト, 1994） | SL.BAT | マウスの割込み処理がスレーブだけ EOI し、マスタの EOI を IRR 次第で省く → マスタの IR7 が処理中のまま。PC-98 のマスタは特殊完全入れ子モードなので、その間もスレーブの割込み（音源・マウス）を通す |
+| TFM version 5（INASOFT, ファイラー）| TFM.COM | ①INT 18h AH=00h の矢印キーが文字コード付き（3A0Bh など）で、AX=3A00h と比べるソフトでカーソルが動かなかった → 実機の BIOS と同じく矢印・INS・DEL などは文字コード 0。②32 ビット除算の商と余りを同じ引数で続けて呼ぶと「空回り」と誤判定し、タイマ割込みを止めたまま停止していた（「読み出し中...」のまま）→ 空回りの判定でスタックの先頭（戻り先）も比べる |
 | Ray IV2（音楽＆映像ソフト, 1995） | RAY.EXE | RIN.COM 常駐 → LIO の入口を ROM の表から写して GINIT → オープニング → メニュー → 曲の演奏（FM） |
 | メタ女 府立メタトポロジー大学付属女子高校 SP（HDD 版） | MTJ.BAT | MACACHE（LoL から DPB の鎖を辿る）→ RFMOUSE / PCP / PCML 常駐。PCML の音声は PIT で割込み、EOI に 0A0h（回転つき）を使い、86 の A466h bit0（LR クロック）で 1 標本ずつ同期する |
 | MIMPI V3.8（MIDI プレーヤー） | MIMPIV3.EXE | CANYON.MID を MIDI（MPU・RS-232C）・FM（サウンド BIOS、`SoundBIOS=1`）・BEEP（/I8）で演奏。画面は LIO で描く |
@@ -249,6 +251,17 @@ PC-98 の漢字 ROM・ANK ROM を、**本物の ROM も第三者のビットマ�
 - 保護モード（DOS エクステンダ、VCPI/DPMI）。EMS/XMS は実モードの範囲で使えます
 - 256 色（PEGC）、31kHz 表示
 - N88-BASIC(86)（ROM）で動くソフト（ブートモードで ROM の BASIC を呼ぶと、その旨を表示して終了）
+
+## 配布とバージョン
+
+バージョンはリリースした日付で `ver 261007`（2026 年 10 月 7 日）のように呼びます。EXE のプロパティの「詳細」と、F11 の画面の右下に表示されます。
+各バージョンの変更点は `CHANGELOG.md` にあります。
+
+- 公開ページ: https://i486.mods.jp/
+- GitHub の Releases には、バージョンごとに 2 つの zip を置きます。
+  - `PC98PLAYER_<版>.zip` … 実行パッケージ（PC98PLAYER.EXE・取扱説明書・設定INI作成.html・サンプル INI）。遊ぶだけならこちら
+  - `PC98PLAYER_<版>_src.zip` … ソースコード一式（EXE を含まない）。自分でビルドする人向け
+- Releases に GitHub が自動で付ける「Source code (zip / tar.gz)」は、リポジトリの中身そのもの（`_src.zip` とほぼ同じ）です。
 
 ## セキュリティソフトの警告について
 

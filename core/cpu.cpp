@@ -903,12 +903,21 @@ unsigned g_spin_hits = 0;
 struct SpinSlot {
     bool valid; uint16_t cs, ip; uint32_t fx;
     uint32_t r[8]; uint16_t sr[6]; uint32_t fl;
+    uint16_t stk[8];   // スタックの先頭（戻り先）。積み下ろしは副作用に数えないので、ここで見分ける
 };
+// スタックの先頭 8 ワード（副作用の無い読み出し。メインメモリの外は 0 とみなす）
+static inline uint16_t spin_stk(int i) {
+    uint32_t a = ((uint32_t)C->sr[SS_] << 4) + (uint16_t)(C->r[ESP] + i * 2);
+    return a + 1 < 0xA0000u ? (uint16_t)(g_ram[a] | (g_ram[a + 1] << 8)) : 0;
+}
 static SpinSlot s_spin[8];   // ループの戻り先ごと（入れ子のループでも外側を見分けられるように）
 static inline bool spin_same(const SpinSlot& s) {
     if (s.fl != C->fl) return false;
     for (int i = 0; i < 8; i++) if (s.r[i] != C->r[i]) return false;
     for (int i = 0; i < 6; i++) if (s.sr[i] != C->sr[i]) return false;
+    // 同じ関数を別の場所から同じ引数で 2 回呼んだ（32 ビット除算の商と余り など）だけのときは、
+    // レジスタが同じでも戻り先が違う。スタックの先頭まで同じときだけ空回りとみなす
+    for (int i = 0; i < 8; i++) if (s.stk[i] != spin_stk(i)) return false;
     return true;
 }
 static inline void spin_record(SpinSlot& s) {
@@ -916,6 +925,7 @@ static inline void spin_record(SpinSlot& s) {
     for (int i = 0; i < 8; i++) s.r[i] = C->r[i];
     for (int i = 0; i < 6; i++) s.sr[i] = C->sr[i];
     s.fl = C->fl;
+    for (int i = 0; i < 8; i++) s.stk[i] = spin_stk(i);
 }
 static inline void spin_clear() { for (auto& s : s_spin) s.valid = false; }
 

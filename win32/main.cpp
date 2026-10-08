@@ -34,6 +34,7 @@
 #include "../core/hdimage.h"
 #include "../core/opna_renderer.h"
 #include "ini_rewrite.h"
+#include "version.h"
 #include <algorithm>
 
 
@@ -876,6 +877,7 @@ static void draw_menu(HDC dc, int dx, int dy, int dw, int dh) {
         draw_text(dc, X(0), Y(356), S(15), RGB(255, 120, 120), g_menu_note, true, S(640));
     draw_text(dc, X(0), Y(380), S(12), RGB(170, 170, 185),
               L"カーソルキー / マウス: 選ぶ　　Enter / 左クリック: 決定　　Esc / 右クリック: やめる", true, S(640));
+    draw_text(dc, X(560), Y(386), S(10), RGB(110, 110, 125), L"ver " PC98P_VER_STR, false, 0);   // 不具合の報告のときに版が分かるように
 }
 
 // フロッピーからのインストールの画面（install_ui.inc）
@@ -1141,6 +1143,8 @@ static void write_template_ini(const std::wstring& path, const std::string& star
         "Smooth=0\r\n"
         "; 仮想 CPU の速さ（MHz 相当）\r\n"
         "CpuMHz=16\r\n"
+        "; グラフィック GDC のクロック（DIP SW 2-8）。2.5 / 5。「GDC を 5MHz にしてください」と出るソフトは 5\r\n"
+        "GDCClock=2.5\r\n"
         "; ゲームのフォルダを何ドライブに見せるか\r\n"
         "Drive=" + std::string(1, drive) + "\r\n"
         "; 音源ボード（86 / 26 / 0=なし）と割込み（3/10/12/13）\r\n"
