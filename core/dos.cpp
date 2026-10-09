@@ -703,7 +703,7 @@ struct LoadResult { uint16_t psp, cs, ip, ss, sp; };
 
 // 戻り値: DOS エラーコード（0 = 成功）
 static int load_program(Machine* m, const std::string& guest, const std::string& tail, uint16_t env_src,
-                        uint16_t parent, LoadResult* out) {
+                        uint16_t parent, LoadResult* out, const char* envname = nullptr) {
     bool exists = false, dev = false;
     std::string canon;
     std::string host = guest_to_host(m, guest, &exists, &dev, &canon);
@@ -713,7 +713,9 @@ static int load_program(Machine* m, const std::string& guest, const std::string&
     std::string base = canon.substr(canon.rfind('\\') == std::string::npos ? 0 : canon.rfind('\\') + 1);
     std::string mcbname = base.substr(0, base.find('.'));
 
-    std::vector<uint8_t> env = build_env(m, env_src, full);
+    // 環境の後ろのプログラム名（C の argv[0]）: 実機の MS-DOS の EXEC は、呼んだプログラムが渡した名前を
+    // そのまま写す（"game.exe" と呼べば "game.exe"）。COMMAND.COM から起動したときは見つけた完全な名前
+    std::vector<uint8_t> env = build_env(m, env_src, envname ? std::string(envname) : full);
     uint16_t env_paras = (uint16_t)((env.size() + 15) / 16);
     uint16_t env_seg, largest;
     if (mem_alloc(m, env_paras, 0xFFFF, &env_seg, &largest)) return 8;
@@ -805,7 +807,10 @@ static int load_program(Machine* m, const std::string& guest, const std::string&
     build_psp(m, psp, (uint16_t)(psp + block_paras), env_seg, parent, tail);
     inherit_handles(m, parent, psp);
     out->psp = psp;
-    if (m->cfg.trace) plog("[dos] 起動 %s %s  PSP=%04X  CS:IP=%04X:%04X  %u KB\n", full.c_str(), tail.c_str(), psp, out->cs, out->ip, block_paras / 64);
+    if (m->cfg.trace) {
+        uint16_t dmy, rest = 0; mem_alloc(m, 0xFFFF, 0, &dmy, &rest);   // 残りの空きの最大（確保はしない）
+        plog("[dos] 起動 %s %s  PSP=%04X  CS:IP=%04X:%04X  %u KB（残りの空きの最大 %u KB）\n", full.c_str(), tail.c_str(), psp, out->cs, out->ip, block_paras / 64, rest / 64);
+    }
     return 0;
 }
 
@@ -813,9 +818,9 @@ static void start_program(Machine* m, const LoadResult& lr) {
     Cpu* c = &m->cpu;
     s_psp = lr.psp;
     s_dta_seg = lr.psp; s_dta_off = 0x80;
-    c->sr[CS_] = lr.cs; c->ip = lr.ip;
-    c->sr[SS_] = lr.ss; c->r[ESP] = lr.sp;
-    c->sr[DS_] = c->sr[ES_] = lr.psp;
+    cpu_setsr(c, CS_, lr.cs); c->ip = lr.ip;
+    cpu_setsr(c, SS_, lr.ss); c->r[ESP] = lr.sp;
+    cpu_setsr(c, DS_, lr.psp); cpu_setsr(c, ES_, lr.psp);
     c->r[EAX] = 0; c->r[EBX] = 0; c->r[ECX] = 0xFF; c->r[EDX] = lr.psp;
     c->r[ESI] = lr.ip; c->r[EDI] = lr.sp; c->r[EBP] = 0x091C;
     c->fl = 0x0202;
@@ -857,7 +862,7 @@ static void terminate(Machine* m, uint8_t code, int type, uint16_t keep) {
         s_frames.pop_back();
         Cpu* c = &m->cpu;
         for (int i = 0; i < 8; i++) c->r[i] = f.r[i];
-        for (int i = 0; i < 6; i++) c->sr[i] = f.sr[i];
+        for (int i = 0; i < 6; i++) cpu_setsr(c, i, f.sr[i]);
         c->ip = f.ip; c->fl = f.fl;
         s_dta_seg = f.dta_seg; s_dta_off = f.dta_off;
         c->halted = 0;
@@ -1337,6 +1342,7 @@ static void dos_exec(Machine* m) {
         if (c == 0x0D) break;
         tail.push_back((char)c);
     }
+    bool as_given = true;   // 環境に呼び出し側の名前をそのまま書く
     // COMMAND.COM /C xxx は xxx を直接起動する
     std::string base = name;
     size_t sl = base.find_last_of("\\/:");
@@ -1368,9 +1374,10 @@ static void dos_exec(Machine* m) {
         std::string found;
         if (dos_resolve_exec(m, prog, &found) != 0) { s_retcode = 1; dos_ok(m); return; }
         name = found;
+        as_given = false;
     }
     LoadResult lr;
-    int err = load_program(m, name, tail, env ? env : rw(m, lin(s_psp, 0x2C)), s_psp, &lr);
+    int err = load_program(m, name, tail, env ? env : rw(m, lin(s_psp, 0x2C)), s_psp, &lr, as_given ? name.c_str() : nullptr);
     if (err) { dos_error(m, (uint16_t)err); return; }
     if (al == 1) {
         ww(m, pb + 0x0E, lr.sp); ww(m, pb + 0x10, lr.ss);
@@ -1395,10 +1402,11 @@ static void int21(Machine* m) {
     uint8_t ah = AH(m);
     Cpu* c = &m->cpu;
     if (m->cfg.trace) {
-        // どの機能を使っているかの記録（機能ごとに最初の 4 回。44h は AL ごと）
+        // どの機能を使っているかの記録（機能ごとに最初の 4 回、メモリの確保・解放は 64 回。44h は AL ごと）
         static uint8_t seen[256][256];
         uint8_t sub = (ah == 0x44 || ah == 0x33 || ah == 0x58 || ah == 0x65) ? AL(m) : 0;
-        if (seen[ah][sub] < 4 && ah != 0x3F && ah != 0x40 && ah != 0x42) {
+        int lim = (ah == 0x48 || ah == 0x49 || ah == 0x4A || ah == 0x58) ? 64 : 4;   // メモリの確保・解放は多めに残す
+        if (seen[ah][sub] < lim && ah != 0x3F && ah != 0x40 && ah != 0x42) {
             seen[ah][sub]++;
             plog("[dos] INT21 AX=%04X BX=%04X CX=%04X DX=%04X\n", AX(m), BX(m), CX(m), DX(m));
         }
@@ -1472,14 +1480,14 @@ static void int21(Machine* m) {
         SETDX(m, (uint16_t)((lt.sec << 8) | cs100)); return; }
     case 0x2D: SETAL(m, 0); return;
     case 0x2E: s_verify = AL(m) & 1; return;
-    case 0x2F: c->sr[ES_] = s_dta_seg; SETBX(m, s_dta_off); return;
+    case 0x2F: cpu_setsr(c, ES_, s_dta_seg); SETBX(m, s_dta_off); return;
     case 0x30: SETAX(m, (uint16_t)(((m->cfg.dos_version & 0xFF) << 8) | ((m->cfg.dos_version >> 8) & 0xFF)) );
                SETBX(m, 0xFF00); SETCX(m, 0); return;
     case 0x31: terminate(m, AL(m), 3, DX(m)); return;
     case 0x1F: case 0x32: {   // DPB の取得（ゲームのドライブだけ持っている）
         int dr = ah == 0x1F || DL(m) == 0 ? (m->cfg.drive - 'A') : DL(m) - 1;
         if (dr != m->cfg.drive - 'A') { SETAL(m, 0xFF); return; }
-        c->sr[DS_] = DOSSEG; SETBX(m, D_DPB); SETAL(m, 0); return; }
+        cpu_setsr(c, DS_, DOSSEG); SETBX(m, D_DPB); SETAL(m, 0); return; }
     case 0x33: {
         uint8_t al = AL(m);
         if (al == 0) R(m)[EDX] = (R(m)[EDX] & ~0xFFu) | s_break_flag;
@@ -1487,8 +1495,8 @@ static void int21(Machine* m) {
         else if (al == 5) R(m)[EDX] = (R(m)[EDX] & ~0xFFu) | 1;   // 起動ドライブ
         else if (al == 6) { SETBX(m, 0x0005); SETDX(m, 0); }
         return; }
-    case 0x34: c->sr[ES_] = DOSSEG; SETBX(m, D_INDOS); return;
-    case 0x35: { uint8_t v = AL(m); SETBX(m, rw(m, v * 4u)); c->sr[ES_] = rw(m, v * 4u + 2); return; }
+    case 0x34: cpu_setsr(c, ES_, DOSSEG); SETBX(m, D_INDOS); return;
+    case 0x35: { uint8_t v = AL(m); SETBX(m, rw(m, v * 4u)); cpu_setsr(c, ES_, rw(m, v * 4u + 2)); return; }
     case 0x36: {
         char d = DL(m) ? (char)('A' + DL(m) - 1) : cur_drive(m);
         if (!drive_valid(m, d)) { SETAX(m, 0xFFFF); return; }
@@ -1607,9 +1615,10 @@ static void int21(Machine* m) {
         write_asciiz(m, DS(m), SI(m), s);
         SETAX(m, 0x0100); dos_ok(m); return; }
     case 0x48: {
-        uint16_t seg, largest = 0;
-        int e = mem_alloc(m, BX(m), s_psp, &seg, &largest);
-        if (e) { SETBX(m, largest); dos_error(m, (uint16_t)e); return; }
+        uint16_t seg, largest = 0, want = BX(m);
+        int e = mem_alloc(m, want, s_psp, &seg, &largest);
+        if (e) { SETBX(m, largest); dos_error(m, (uint16_t)e); if (m->cfg.trace) plog("[dos]   確保 %u 段落 → 失敗（最大 %u 段落）\n", (unsigned)want, (unsigned)largest); return; }
+        if (m->cfg.trace) { static int n = 0; if (n++ < 64) plog("[dos]   確保 → %04X（%u 段落、持ち主 %04X）\n", seg, (unsigned)want, s_psp); }
         SETAX(m, seg); dos_ok(m); return; }
     case 0x49: { int e = mem_free(m, ES(m)); mcb_merge(m); if (e) dos_error(m, (uint16_t)e); else dos_ok(m); return; }
     case 0x4A: {
@@ -1647,7 +1656,7 @@ static void int21(Machine* m) {
         if (AH(m) == 0x55) { s_psp = np; SETAL(m, 0xF0); }
         return; }
     case 0x51: case 0x62: SETBX(m, s_psp); return;
-    case 0x52: c->sr[ES_] = DOSSEG; SETBX(m, D_LOL); return;
+    case 0x52: cpu_setsr(c, ES_, DOSSEG); SETBX(m, D_LOL); return;
     case 0x54: SETAL(m, s_verify); return;
     case 0x56: {
         std::string a = read_asciiz(m, DS(m), DX(m)), b = read_asciiz(m, ES(m), DI(m));
@@ -1699,7 +1708,7 @@ static void int21(Machine* m) {
         write_asciiz(m, ES(m), DI(m), std::string(1, s_sg_drive ? s_sg_drive : m->cfg.drive) + ":\\" + canon);
         dos_ok(m); return; }
     case 0x63:
-        if (AL(m) == 0) { c->sr[DS_] = DOSSEG; SETSI(m, D_DBCS); SETAL(m, 0); }
+        if (AL(m) == 0) { cpu_setsr(c, DS_, DOSSEG); SETSI(m, D_DBCS); SETAL(m, 0); }
         else SETAL(m, 0);
         dos_ok(m); return;
     case 0x65: {
@@ -2268,9 +2277,9 @@ static void shell_resume(Machine* m) {
     s_retcode_last = s_retcode;
     s_psp = s_shell_psp;
     s_dta_seg = s_shell_psp; s_dta_off = 0x80;
-    c->sr[CS_] = ROMSEG; c->ip = s_shell_entry;
-    c->sr[SS_] = s_shell_psp; c->r[ESP] = 0x0FFE;
-    c->sr[DS_] = c->sr[ES_] = s_shell_psp;
+    cpu_setsr(c, CS_, ROMSEG); c->ip = s_shell_entry;
+    cpu_setsr(c, SS_, s_shell_psp); c->r[ESP] = 0x0FFE;
+    cpu_setsr(c, DS_, s_shell_psp); cpu_setsr(c, ES_, s_shell_psp);
     c->fl = 0x0202;
     c->halted = 0;
 }

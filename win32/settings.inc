@@ -84,6 +84,8 @@ static void build_fields() {
         s_f.push_back({L"Font", K_EDITLIST, L"漢字のフォント", L"ＭＳ ゴシック", A_RESTART, fo});
     }
     s_f.push_back({L"FontShift", K_CHECK, L"半角文字を 1 ドット右へ寄せる（実機の ROM 風）", L"1", A_RESTART});
+    s_f.push_back({L"GDCClock", K_LIST, L"GDC クロック", L"2.5", A_RESTART,
+                   {{L"2.5", L"2.5MHz（DIP SW 2-8 OFF）"}, {L"5", L"5MHz（DIP SW 2-8 ON）"}}});
     s_f.push_back({L"KanjiJIS", K_LIST, L"漢字の字形", L"78", A_RESTART, {{L"78", L"JIS78（当時の PC-98）"}, {L"83", L"JIS83"}}});
     // 動作
     s_f.push_back({L"CpuMHz", K_EDITLIST, L"CPU の速さ", L"16", A_RESTART, num_opts({8, 10, 12, 16, 20, 25, 33, 40, 66, 75, 100, 133}, L""), 1, 1000, L"MHz"});
@@ -99,7 +101,7 @@ static void build_fields() {
     s_f.push_back({L"Sound", K_CHECK, L"FM 音源を鳴らす", L"1", A_RESTART});
     s_f.push_back({L"SampleRate", K_LIST, L"サンプリング周波数", L"44100", A_RESTART, num_opts({22050, 44100, 48000}, L" Hz")});
     // MIDI
-    s_f.push_back({L"MIDI", K_CHECK, L"MIDI を使う（MPU-PC98II を載せる）", L"0", A_RESTART});
+    s_f.push_back({L"MIDI", K_CHECK, L"MIDI を使う（MPU-PC98II を載せる）", L"1", A_RESTART});
     {
         std::vector<Opt> md = {{L"-1", L"既定の出力（Microsoft MIDI マッパー）"}};
         UINT n = midiOutGetNumDevs();
@@ -139,6 +141,10 @@ static void read_ini_values() {
             v = raw.empty() ? f.def : std::to_wstring(one.geti("X.K", _wtoi(f.def.c_str())));
         }
         if (lstrcmpiW(f.key, L"Scale") == 0) { int s = ival(v, 2); v = std::to_wstring(s < 1 ? 1 : s > 8 ? 8 : s); }
+        if (lstrcmpiW(f.key, L"GDCClock") == 0) {
+            std::wstring u = W(raw); for (auto& c : u) c = (wchar_t)towupper(c);
+            v = (u == L"5" || u == L"5MHZ" || u == L"5.0") ? L"5" : L"2.5";
+        }
         if (lstrcmpiW(f.key, L"KanjiJIS") == 0) v = ival(v, 78) == 83 ? L"83" : L"78";
         f.init = f.cur = v;
         if (f.kind == K_LIST) {   // 一覧に無い値（INI に手で書いたもの）も選べるように足す
@@ -505,15 +511,16 @@ static void open() {
     };
     const int LX = 12, RX = 392, GW = 368, R = 28;
     // 左: 画面
-    group(L"画面", LX, 6, GW, 24 + 6 * R + 6);
+    group(L"画面", LX, 6, GW, 24 + 7 * R + 6);
     place(L"Scale", LX + 12, 28, 130, 210);
     place(L"Smooth", LX + 12, 28 + R, 130, 210);
     place(L"FullScreen", LX + 12, 28 + R * 2, 130, 210);
     place(L"Font", LX + 12, 28 + R * 3, 130, 210);
     place(L"FontShift", LX + 12, 28 + R * 4, 130, 210);
     place(L"KanjiJIS", LX + 12, 28 + R * 5, 130, 210);
+    place(L"GDCClock", LX + 12, 28 + R * 6, 130, 210);
     // 左: 動作
-    int y2 = 6 + 24 + 6 * R + 6 + 8;
+    int y2 = 6 + 24 + 7 * R + 6 + 8;
     group(L"動作", LX, y2, GW, 24 + 5 * R + 6);
     place(L"CpuMHz", LX + 12, y2 + 22, 130, 150);
     place(L"MouseSpeed", LX + 12, y2 + 22 + R, 130, 150);

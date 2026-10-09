@@ -328,6 +328,7 @@ Start=A:\AUTOEXEC.BAT</pre>
   <tr><td><code>Smooth=</code></td><td>0</td><td>1 で拡大時になめらかにする（0 はドットのまま）。</td></tr>
   <tr><td><code>Font=</code></td><td>ＭＳ ゴシック</td><td>漢字の字形を作るもとにする Windows のフォント。</td></tr>
   <tr><td><code>FontShift=</code></td><td>1</td><td>半角文字が左端の列まで使っていたら 1 ドット右へ寄せ、実機の ROM と同じく左端を空ける。0 で Windows のフォントのまま（MIMPI V4 の曲名のように、半角を太字にして描くソフトで線が点線のように崩れるのを防ぐ）。</td></tr>
+  <tr><td><code>GDCClock=</code></td><td>2.5</td><td>グラフィック GDC のクロック（実機の DIP SW 2-8）。<code>2.5</code> か <code>5</code>。<code>5</code> にすると、BIOS で 400 ライン表示にしたときグラフィック GDC が 5MHz になり（1 行の長さ PITCH の単位がバイトに変わる）、DIP SW の状態（ポート 31h）・BIOS のワーク（0054Dh）・ポート 6Ah の 84h／85h も 5MHz の機械と同じに見せます。「GDC のクロックを 5MHz（2.5MHz）にしてください」と出て起動しないソフトや、画面が崩れるソフトで切り替えてください。F11 →「S: 画面＆サウンド設定」でも変えられます。</td></tr>
   <tr><td><code>KanjiJIS=</code></td><td>78</td><td>78: PC-98 と同じ旧 JIS の字の並び。83: 新 JIS の並び。</td></tr>
 </table>
 </div>
@@ -391,6 +392,7 @@ Start=A:\AUTOEXEC.BAT</pre>
   <tr><td><code>EMSKB=</code></td><td>4096</td><td>EMS の容量（KB）。</td></tr>
   <tr><td><code>XMS=</code></td><td>1</td><td>1: XMS（HIMEM.SYS 相当）を用意する。</td></tr>
   <tr><td><code>XMSKB=</code></td><td>8192</td><td>XMS の容量（KB）。</td></tr>
+  <tr><td><code>ExtMemMB=</code></td><td>8</td><td>拡張メモリ（1MB より上の RAM）の大きさ（MB、14 まで）。EMS/XMS を通さずに自分で保護モードへ切り替えて使うゲーム向けです（「プロテクトメモリが確保出来ません」と出るとき）。BIOS（0401h）に見せ、INT 1Fh のブロック転送でも使えます。0 で無し。</td></tr>
   <tr><td><code>MemoryKB=</code></td><td>640</td><td>通常メモリの大きさ（KB）。</td></tr>
   <tr><td><code>FirstMCB=</code></td><td>0200</td><td>空きメモリの始まる位置（16 進のセグメント）。一部のゲームはこの位置によって動いたり落ちたりします（<a href="ch4.html#crash">第四章</a>）。</td></tr>
 </table>
@@ -427,7 +429,7 @@ ExitOnEnd=0</pre>
   <li>多くのゲームは起動時に音源ボードを自動で判別します。既定の <code>SoundBoard=86</code> で、86 ボード用のドライバが選ばれるのが普通です。</li>
   <li>音が出ない・変な場合は <code>SoundBoard=26</code> を試してください。</li>
   <li>ゲーム側で割込み番号を設定する場合は <code>SoundIRQ=</code> を合わせます（INT0=3、INT41=10、INT5=12、INT6=13）。</li>
-  <li><code>MIDI=1</code> にすると、ゲームが FM より MIDI を選ぶことがあります。Windows 標準の MIDI 音源は当時の音源（SC-55 や MT-32）と音色が異なるので、FM で聴きたい場合は 0 のままにしてください。</li>
+  <li>自動で作る INI は <code>MIDI=1</code>（MIDI 音源あり）です。ゲームによっては FM より MIDI を自動で選びます。Windows 標準の MIDI 音源は当時の音源（SC-55 や MT-32）と音色が異なるので、FM で聴きたい場合は <code>MIDI=0</code> にしてください。</li>
 </ul>
 
 <h2 id="memory">1-10. メモリ（EMS／XMS）の設定</h2>
@@ -436,7 +438,7 @@ ExitOnEnd=0</pre>
 <ul>
   <li>通常メモリの空きは、起動した直後でおよそ 627KB です。</li>
   <li>EMS や XMS があると落ちるゲームがあれば、<code>EMS=0</code>、<code>XMS=0</code> を 1 つずつ試してください。</li>
-  <li>DOS エクステンダ（プロテクトモード）や VCPI/DPMI を必要とするゲームには対応していません。</li>
+  <li>自分でプロテクトモード（保護モード）に切り替えて 1MB より上のメモリを使うゲームは動きます（<code>ExtMemMB=</code>）。ページング・仮想 86 モードを使うもの、VCPI/DPMI（EMM386 の下で動く DOS エクステンダ）を必要とするものには対応していません。</li>
 </ul>
 
 <h2 id="gamepad">1-11. ゲームパッド</h2>

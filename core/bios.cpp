@@ -111,11 +111,32 @@ void bios_key_irq(Machine* m) {
         return;
     }
     if (brk) return;
-    uint8_t ch = 0;
-    if (sc < 0x60) ch = (sh & 1) ? k_shift[sc] : k_norm[sc];
-    if ((sh & 0x02) && ch >= 'a' && ch <= 'z') ch = (uint8_t)(ch - 0x20);   // CAPS
-    if ((sh & 0x10) && ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'))) ch = (uint8_t)((ch & 0x1F));
-    kb_push(m, (uint16_t)((sc << 8) | ch));
+    // キーバッファに積むコード（AH = キーコード, AL = 文字コード）。実機の BIOS と同じく、
+    // ・カーソル・ROLL UP/DOWN・INS・DEL・HELP は文字コード 0（AX=3A00h など）。
+    //   （0Bh・0Ah などへの置き換えは MS-DOS の CON がキーコードを見て行う。BIOS で文字コードを付けると、
+    //    INT 18h AH=00h で AX=3A00h などと比べるソフトで矢印キーが効かない）
+    // ・XFER・NFER・HOME/CLR・f･1〜f･10 は AH だけ（SHIFT・CTRL で AH が変わる）、AL = 0。
+    // ・vf･1〜vf･5 など、コードの無いキーと STOP・COPY は積まない
+    bool shift = (sh & 0x01) != 0, ctrl = (sh & 0x10) != 0;
+    uint16_t code;
+    if (sc == 0x35 || sc == 0x51) {                         // XFER / NFER
+        uint8_t base = sc == 0x35 ? 0x35 : 0x51;
+        code = (uint16_t)((ctrl ? (base == 0x35 ? 0xB5 : 0xB1) : shift ? (base == 0x35 ? 0xA5 : 0xA1) : base) << 8);
+    } else if (sc == 0x3E) {                                // HOME/CLR（SHIFT で CLR = AEh）
+        if (ctrl) return;
+        code = shift ? 0xAE00 : 0x3E00;
+    } else if (sc >= 0x36 && sc <= 0x3F) {                  // ROLL UP/DOWN・INS・DEL・矢印・HELP
+        code = (uint16_t)(sc << 8);
+    } else if (sc >= 0x62 && sc <= 0x6B) {                  // f･1〜f･10（SHIFT +20h、CTRL +30h）
+        code = (uint16_t)((sc + (ctrl ? 0x30 : shift ? 0x20 : 0)) << 8);
+    } else if (sc < 0x52) {
+        uint8_t ch = shift ? k_shift[sc] : k_norm[sc];
+        if (sc == 0x33 && !shift) return;                   // 「＿」のキーは SHIFT なしではコード無し
+        if ((sh & 0x02) && ch >= 'a' && ch <= 'z') ch = (uint8_t)(ch - 0x20);   // CAPS
+        if (ctrl && ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '@' && ch <= '_'))) ch = (uint8_t)(ch & 0x1F);
+        code = (uint16_t)((sc << 8) | ch);
+    } else return;                                          // vf･1〜vf･5・STOP・COPY など
+    kb_push(m, code);
 }
 
 // ---- コンソール（MS-DOS の CON）-------------------------------------------------
@@ -354,6 +375,8 @@ static void int18(Machine* m) {
         uint8_t al = AL(m);
         m->ram[0x53C] = al;
         m->gdcm.csrform[0] = (uint8_t)((m->gdcm.csrform[0] & 0xE0) | ((al & 1) ? 19 : 15));
+        m->gdcm.csrform[1] = (uint8_t)(m->gdcm.csrform[1] & 0xE0);                       // カーソルは 0 ライン目から
+        m->gdcm.csrform[2] = (uint8_t)((((al & 1) ? 19 : 15) << 3) | 3);                  // 最後のラインまで
         s_con.rows = (al & 1) ? 20 : 25;
         m->ram[0x712] = (uint8_t)(s_con.rows - 1);
         m->modeff[0] = (al & 4) ? 1 : 0;   // 属性 bit4 = 簡易グラフ(1) / バーチカルライン(0)
@@ -412,6 +435,10 @@ static void int18(Machine* m) {
                 fontrom_gaiji_write(code, y, false, mem_rb(m, buf + 3 + y * 2));
             }
         return; }
+    case 0x1B:   // KCG のアクセスモード: AL=0 コードアクセス / AL=1 ドットアクセス（0053Ch bit3 とモードF/F の bit5）
+        if (AL(m) == 0) { m->ram[0x53C] &= (uint8_t)~0x08; m->modeff[5] = 0; }
+        else if (AL(m) == 1) { m->ram[0x53C] |= 0x08; m->modeff[5] = 1; }
+        return;
     case 0x40: m->gdcs.display = 1; m->ram[0x54C] |= 0x80; return;
     case 0x41: m->gdcs.display = 0; m->ram[0x54C] &= 0x7F; return;
     case 0x42: {
@@ -420,6 +447,9 @@ static void int18(Machine* m) {
         // CH bit7-6: 01 = VRAM の後半 200 ライン（SAD=8000 ワード）/ 10 = 前半 200 ライン / 11 = 400 ライン
         // （master.lib の graph_200line(1) は前者で、前半を隠し VRAM に使う: 東方夢時空）
         memset(m->gdcs.pram, 0, 4);
+        // 実機の BIOS と同じく、200 ラインはグラフィック GDC の CSRFORM（1 行の走査線数 = 2）で作る。
+        // （フラグで決め打ちにすると、あとでソフトが GDC に直接 CSRFORM を書いて 400 ラインに戻したときに縦 2 倍のままになる）
+        m->gdcs.csrform[0] = (uint8_t)((m->gdcs.csrform[0] & 0xE0) | (mode == 3 ? 0 : 1));
         if (mode == 3) { m->gfx_200 = 0; m->gdcs.zoom = 0; }
         else {
             m->gfx_200 = 1; m->gfx_200_lower = 0; m->gdcs.zoom = 0;
@@ -428,6 +458,10 @@ static void int18(Machine* m) {
         }
         m->gfx_color = (ch & 0x20) ? 0 : 1;
         m->disp_bank = (ch >> 4) & 1;
+        // GDC 5MHz の機械（0054Dh bit5）では、400 ライン表示にするとグラフィック GDC を 5MHz にし（bit2、PITCH 80 バイト）、
+        // 200 ライン表示に戻すと 2.5MHz（PITCH 40 ワード）に戻す
+        if (mode == 3 && (m->ram[0x54D] & 0x24) == 0x20) { m->ram[0x54D] |= 0x04; m->gdc_clk5 = 1; m->gdcs.pitch = 80; }
+        else if (mode != 3 && (m->ram[0x54D] & 0x24) == 0x24) { m->ram[0x54D] &= (uint8_t)~0x04; m->gdc_clk5 = 0; m->gdcs.pitch = 40; }
         return; }
     case 0x43: {   // パレット（デジタル）
         uint32_t a = lin(m->cpu.sr[DS_], BX(m));
@@ -585,7 +619,7 @@ static void int33(Machine* m) {
     case 0x14: {   // ハンドラの入れ替え: 古いものを CX, ES:DX に返す
         uint16_t om = d->cb_mask, os = d->cb_seg, oo = d->cb_off;
         mdrv_set_handler(m, CX(m), m->cpu.sr[ES_], DX(m));
-        SETCX(m, om); m->cpu.sr[ES_] = os; SETDX(m, oo);
+        SETCX(m, om); cpu_setsr(&m->cpu, ES_, os); SETDX(m, oo);
         return; }
     case 0x15: SETBX(m, 64); return;          // 状態の保存に要る大きさ
     case 0x16: case 0x17: return;              // 状態の保存・復元（何もしない）
@@ -677,7 +711,28 @@ void bios_hle(Machine* m, uint8_t n) {
         }
         if (m->cfg.trace) plog("[fd] INT1B AX=%04X（フロッピー以外の装置: 未接続を返す）\n", (unsigned)(m->cpu.r[EAX] & 0xFFFF));
         SETAH(m, 0x60); set_cf(m, true); return;
-    case HLE_INT1F: SETAH(m, 0x00); set_cf(m, true); return;
+    case HLE_INT1F: {
+        // INT 1Fh: AH=90h は 1MB より上とのブロック転送（ES:BX+10h/+18h の記述子にある 24 ビットの
+        // ベースと上限、SI/DI がそれぞれのオフセット、CX がバイト数）
+        uint8_t ah = AH(m);
+        if (!(ah & 0x80)) return;
+        if (ah == 0xCC) { set_cf(m, true); return; }
+        if (!(ah & 0x10)) { set_cf(m, false); return; }
+        if (ah != 0x90) return;
+        uint32_t t = ((uint32_t)m->cpu.sr[ES_] << 4) + (uint16_t)BX(m);
+        uint8_t w[16];
+        for (int i = 0; i < 16; i++) w[i] = mem_rb(m, t + 0x10 + i);
+        uint32_t slim = (uint32_t)(w[0] | (w[1] << 8)) + 1, dlim = (uint32_t)(w[8] | (w[9] << 8)) + 1;
+        uint32_t sbase = w[2] | (w[3] << 8) | ((uint32_t)w[4] << 16), dbase = w[10] | (w[11] << 8) | ((uint32_t)w[12] << 16);
+        uint32_t so = (uint16_t)m->cpu.r[ESI], dof = (uint16_t)m->cpu.r[EDI];
+        uint32_t n = (uint32_t)(uint16_t)(CX(m) - 1) + 1;
+        if (so >= slim || dof >= dlim || so + n > slim || dof + n > dlim) { set_cf(m, true); return; }
+        uint32_t keep = g_addr_mask; g_addr_mask = A20_ON_MASK;
+        for (uint32_t i = 0; i < n; i++) mem_wb(m, dbase + dof + i, mem_rb(m, sbase + so + i));
+        g_addr_mask = keep;
+        { static int k = 0; if (m->cfg.trace && k < 16) { k++; plog("[bios] INT1F AH=90 %06X → %06X（%u バイト）\n", sbase + so, dbase + dof, n); } }
+        set_cf(m, false);
+        return; }
     case HLE_INT33: if (m->cfg.trace > 1) plog("[mouse] INT 33h AX=%04X BX=%04X CX=%04X DX=%04X\n", AX(m), BX(m), CX(m), DX(m)); int33(m); return;
     case HLE_MSIRQ: mdrv_irq(m); return;
     case HLE_MSIRQ_END: m->mdrv.in_cb = 0; return;
@@ -750,8 +805,12 @@ void bios_init(Machine* m) {
     r[0x501] = 0x80 | 0x04;         // 8MHz 系, メモリ 640KB
     r[0x53C] = 0x00;
     r[0x54C] = 0x4E;                // 16 色ボードあり 等
-    r[0x54D] = 0x40;                // EGC あり
+    r[0x54D] = (uint8_t)(0x40 | (m->cfg.gdc_5mhz ? 0x20 : 0x00));   // EGC あり / bit5 = GDC 5MHz を使える（DIP SW 2-8）/ bit2 = いま 5MHz
     r[0x480] = 0x00;
+    // 拡張メモリの大きさ（0401h: 1MB より上を 128KB 単位、0594h: 16MB より上を 1MB 単位）
+    r[0x401] = (uint8_t)((m->ram_size - 0x100000u) / 0x20000u);
+    if (m->ram_size - 0x100000u <= 0x10000u) r[0x401] = 0;
+    r[0x594] = 0;
     r[0x481] = 0x00;
     r[0x458] = 0x00;
     r[0x55D] = 0x01;               // ハードディスク（SASI/IDE）がユニット 0 に付いている（ゲームのフォルダ）
@@ -855,7 +914,7 @@ bool bios_boot_fd(Machine* m, std::string* why) {
     Cpu* c = &m->cpu;
     for (int i = 0; i < 8; i++) c->r[i] = 0;
     c->r[ESP] = 0x0000;
-    c->sr[CS_] = seg; c->sr[DS_] = 0; c->sr[ES_] = 0; c->sr[SS_] = 0x1FC0;
+    cpu_setsr(c, CS_, seg); cpu_setsr(c, DS_, 0); cpu_setsr(c, ES_, 0); cpu_setsr(c, SS_, 0x1FC0);
     c->ip = 0;
     c->fl |= FL_IF;
     c->r[EAX] = 0x0090;            // AL = 起動したドライブ

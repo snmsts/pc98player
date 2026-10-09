@@ -34,6 +34,7 @@
 #include "../core/hdimage.h"
 #include "../core/opna_renderer.h"
 #include "ini_rewrite.h"
+#include "version.h"
 #include <algorithm>
 
 
@@ -876,6 +877,7 @@ static void draw_menu(HDC dc, int dx, int dy, int dw, int dh) {
         draw_text(dc, X(0), Y(356), S(15), RGB(255, 120, 120), g_menu_note, true, S(640));
     draw_text(dc, X(0), Y(380), S(12), RGB(170, 170, 185),
               L"カーソルキー / マウス: 選ぶ　　Enter / 左クリック: 決定　　Esc / 右クリック: やめる", true, S(640));
+    draw_text(dc, X(560), Y(386), S(10), RGB(110, 110, 125), L"ver " PC98P_VER_STR, false, 0);   // 不具合の報告のときに版が分かるように
 }
 
 // フロッピーからのインストールの画面（install_ui.inc）
@@ -1141,13 +1143,15 @@ static void write_template_ini(const std::wstring& path, const std::string& star
         "Smooth=0\r\n"
         "; 仮想 CPU の速さ（MHz 相当）\r\n"
         "CpuMHz=16\r\n"
+        "; グラフィック GDC のクロック（DIP SW 2-8）。2.5 / 5。「GDC を 5MHz にしてください」と出るソフトは 5\r\n"
+        "GDCClock=2.5\r\n"
         "; ゲームのフォルダを何ドライブに見せるか\r\n"
         "Drive=" + std::string(1, drive) + "\r\n"
         "; 音源ボード（86 / 26 / 0=なし）と割込み（3/10/12/13）\r\n"
         "SoundBoard=86\r\n"
         "SoundIRQ=12\r\n"
-        "; MIDI（MPU-PC98II, E0D0h）を載せる。1 にすると Windows の MIDI 出力へ送る（MidiDevice=-1 は既定の出力）\r\n"
-        "MIDI=0\r\n"
+        "; MIDI（MPU-PC98II, E0D0h）を載せて Windows の MIDI 出力へ送る（MidiDevice=-1 は既定の出力）。0 で載せない（FM で聴きたいのに MIDI が選ばれるとき）\r\n"
+        "MIDI=1\r\n"
         "MidiDevice=-1\r\n"
         "; MIDI の演奏速度（%）。MIDI だけ遅いときに 120〜150 などへ上げる（MPU のテンポで演奏するドライバに効く）\r\n"
         "MidiSpeedFix=100\r\n"
@@ -1171,6 +1175,8 @@ static void write_template_ini(const std::wstring& path, const std::string& star
         "EMSKB=4096\r\n"
         "XMS=1\r\n"
         "XMSKB=8192\r\n"
+        "; 拡張メモリ（1MB より上の RAM、MB）。自分で保護モードに切り替えて使うゲーム向け（BIOS の 0401h に見せる）。0 で無し\r\n"
+        "ExtMemMB=8\r\n"
         "; 先頭 MCB のセグメント（16 進、既定 0200）。動かないソフトで 0100〜0600 などを試す\r\n"
         "FirstMCB=0200\r\n"
         "; 2000 年問題対策: 年だけ置き換える（例 1998）/ 起動日を指定の日付にする（例 1999/12/31）。空なら今日\r\n"
