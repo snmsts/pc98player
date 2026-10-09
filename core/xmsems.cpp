@@ -73,13 +73,17 @@ static bool xms_ptr(Machine* m, uint16_t h, uint32_t off, uint32_t len, uint8_t*
 static void xms_call(Machine* m) {
     uint8_t fn = AH(m);
     uint32_t free_kb = s_xms_total_kb > xms_used_kb() ? s_xms_total_kb - xms_used_kb() : 0;
-    auto fail = [&](uint8_t e) { SETAX(m, 0); SETBL(m, e); };
+    if (m->cfg.trace) {   // 機能ごとに最初の 4 回（失敗はすべて下で記録）
+        static uint8_t seen[256];
+        if (seen[fn] < 4) { seen[fn]++; plog("[xms] AH=%02X BX=%04X DX=%04X（空き %u KB）\n", fn, (unsigned)(uint16_t)m->cpu.r[EBX], (unsigned)(uint16_t)m->cpu.r[EDX], (unsigned)free_kb); }
+    }
+    auto fail = [&](uint8_t e) { SETAX(m, 0); SETBL(m, e); if (m->cfg.trace) plog("[xms] AH=%02X -> エラー %02X\n", fn, e); };
     switch (fn) {
     case 0x00: SETAX(m, 0x0300); SETBX(m, 0x0395); SETDX(m, 1); return;
     case 0x01: if (s_hma_used) { fail(0x91); return; } s_hma_used = true; SETAX(m, 1); return;
     case 0x02: if (!s_hma_used) { fail(0x93); return; } s_hma_used = false; SETAX(m, 1); return;
     case 0x03: case 0x05:
-        m->a20 = 1; g_addr_mask = 0x1FFFFF; SETAX(m, 1); SETBL(m, 0); return;
+        m->a20 = 1; g_addr_mask = A20_ON_MASK; SETAX(m, 1); SETBL(m, 0); return;
     case 0x04: case 0x06:
         m->a20 = 0; g_addr_mask = 0xFFFFF; SETAX(m, 1); SETBL(m, 0); return;
     case 0x07: SETAX(m, m->a20 ? 1 : 0); SETBL(m, 0); return;
@@ -156,7 +160,7 @@ bool xms_int2f(Machine* m) {
     if (!xms_enabled(m)) return false;
     uint16_t ax = AX(m);
     if (ax == 0x4300) { SETAL(m, 0x80); return true; }
-    if (ax == 0x4310) { m->cpu.sr[ES_] = ROMSEG; SETBX(m, s_xms_entry_off); return true; }
+    if (ax == 0x4310) { cpu_setsr(&m->cpu, ES_, ROMSEG); SETBX(m, s_xms_entry_off); return true; }
     return false;
 }
 
@@ -204,7 +208,11 @@ static bool ems_region_addr(const EmsRegion& r, uint32_t i, uint8_t** host, uint
 
 static void ems_call(Machine* m) {
     uint8_t fn = AH(m);
-    auto ret = [&](uint8_t st) { SETAH(m, st); };
+    if (m->cfg.trace) {   // 機能ごとに最初の 4 回（失敗はすべて下で記録）
+        static uint8_t seen[256];
+        if (seen[fn] < 4) { seen[fn]++; plog("[ems] INT67 AX=%04X BX=%04X DX=%04X（空き %d ページ）\n", (unsigned)(uint16_t)m->cpu.r[EAX], (unsigned)(uint16_t)m->cpu.r[EBX], (unsigned)(uint16_t)m->cpu.r[EDX], (int)ems_free_pages()); }
+    }
+    auto ret = [&](uint8_t st) { SETAH(m, st); if (st && m->cfg.trace) plog("[ems] AH=%02X -> エラー %02X\n", fn, st); };
     switch (fn) {
     case 0x40: ret(0); return;
     case 0x41: SETBX(m, EMS_FRAME_SEG); ret(0); return;

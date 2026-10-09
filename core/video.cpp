@@ -36,11 +36,10 @@ void video_render(Machine* m, uint32_t* out) {
     uint32_t sad2 = (uint32_t)(m->gdcs.pram[4] | (m->gdcs.pram[5] << 8) | ((m->gdcs.pram[6] & 3) << 16));
     int zoom = ((m->gdcs.zoom >> 4) & 15) + 1;   // ZOOM の上位 4bit が表示の倍率（下位は描画用）
     // 1 本の VRAM の行を何本の走査線で見せるか: GDC の CSRFORM の「1 行の走査線数」（200 ライン表示は 2）、
-    // ZOOM、ポート 68h の 200 ライン指定のうち大きいもの
+    // と ZOOM のうち大きいもの（BIOS・LIO の 200 ライン表示も CSRFORM で作る）
     int rep = (m->gdcs.csrform[0] & 0x1F) + 1;
     if (rep > 4) rep = 1;                       // グラフィックでは 1〜2 のはず。変な値は無視
     if (zoom > rep) rep = zoom;
-    if (m->gfx_200 && rep < 2) rep = 2;
     // 1 行の大きさ: GDC の PITCH（ワード数）。横に広い仮想画面を作って SAD で横スクロールするゲームがある
     //（ヴァリアブル・ジオ 2 の対戦画面は 64 ワード = 1024 ドット幅）。表示するのは先頭の 40 ワード（640 ドット）
     // GDC が 5MHz のときは PITCH がバイト単位（8 ドット）、2.5MHz のときはワード単位（16 ドット）
@@ -144,8 +143,10 @@ void video_render(Machine* m, uint32_t* out) {
         uint32_t ead = m->gdcm.ead & 0xFFF;
         int r = (int)(ead / 80), c = (int)(ead % 80);
         if (r < rows) {
+            // カーソルの形: CSRFORM の開始ライン〜終了ライン。開始が終了より下なら何も出ない
+            //（カーソルを消すのに表示ビットではなくこちらを使うソフトがある）
             int top = m->gdcm.csrform[1] & 0x1F, bot = (m->gdcm.csrform[2] >> 3) & 0x1F;
-            if (bot < top || bot >= rowh) { top = 0; bot = rowh - 1; }
+            if (bot >= rowh) bot = rowh - 1;
             for (int y = top; y <= bot; y++) {
                 if (r * rowh + y >= 400) break;
                 uint32_t* o = out + (r * rowh + y) * 640 + c * 8;

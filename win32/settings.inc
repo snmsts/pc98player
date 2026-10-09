@@ -101,7 +101,7 @@ static void build_fields() {
     s_f.push_back({L"Sound", K_CHECK, L"FM 音源を鳴らす", L"1", A_RESTART});
     s_f.push_back({L"SampleRate", K_LIST, L"サンプリング周波数", L"44100", A_RESTART, num_opts({22050, 44100, 48000}, L" Hz")});
     // MIDI
-    s_f.push_back({L"MIDI", K_CHECK, L"MIDI を使う（MPU-PC98II を載せる）", L"0", A_RESTART});
+    s_f.push_back({L"MIDI", K_CHECK, L"MIDI を使う（MPU-PC98II を載せる）", L"1", A_RESTART});
     {
         std::vector<Opt> md = {{L"-1", L"既定の出力（Microsoft MIDI マッパー）"}};
         UINT n = midiOutGetNumDevs();

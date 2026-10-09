@@ -140,13 +140,13 @@ FakeDate=1999/12/31    ; 起動した日を 1999 年 12 月 31 日にする（�
 </div>
 
 <h2 id="security">4-9. セキュリティソフトの警告</h2>
-<p>PC98PLAYER.EXE には電子署名がないため、Windows Defender などが「<code>Trojan:Script/Wacatac.H!ml</code>」のような名前で警告することがあります。
+<p>実行パッケージの PC98PLAYER.EXE は、公開しているソースコード（<code>PC98PLAYER_&lt;版&gt;_src.zip</code>）と同じものから Visual Studio 2026 でビルドしたものです。電子署名は付いていないため、ダウンロードや初回起動のときに SmartScreen が「発行元を確認できません」と警告したり、Windows Defender などが「<code>Trojan:Script/Wacatac.H!ml</code>」のような名前で警告することがあります。
 末尾の <code>!ml</code> は、既知のウイルスと一致したのではなく、機械学習による「怪しそう」という推定であることを示します。</p>
 <ul>
   <li>PC98PLAYER はネットワークへの接続、ほかのプログラムへの干渉、キー入力の記録などは行いません。書き込むのは、ゲームのフォルダの中（ゲーム自身のセーブ、INI、ステートセーブ、ログ）と、インストールアシスタントで展開・インストールするフォルダ、フロッピーのイメージ（ゲームが書き込んだとき）だけです。</li>
-  <li>配布元以外から入手した EXE は使わないでください。</li>
+  <li>配布元（i486.mods.jp・GitHub の Releases）以外から入手した EXE は使わないでください。</li>
   <li>誤検知と判断される場合は、Microsoft の提出窓口（https://www.microsoft.com/wdsi/filesubmission）へ「誤検知」として報告できます。</li>
-  <li>同梱のソースコードから Visual Studio でビルドした EXE を使う方法もあります。</li>
+  <li>ソースコード（<code>PC98PLAYER_&lt;版&gt;_src.zip</code>）から、自分で Visual Studio でビルドした EXE を使う方法もあります。</li>
 </ul>
 
 <h2 id="trace">4-10. トレース（記録）の取り方</h2>
