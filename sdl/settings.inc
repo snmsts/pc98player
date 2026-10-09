@@ -85,6 +85,8 @@ static void build_fields() {
     s_f.push_back({"Font", K_TEXT, "漢字のフォント", "", A_RESTART});
     s_f.push_back({"FontShift", K_CHECK, "半角文字を 1 ドット右へ寄せる（ROM 風）", "1", A_RESTART});
     s_f.push_back({"KanjiJIS", K_LIST, "漢字の字形", "78", A_RESTART, {{"78", "JIS78（当時の PC-98）"}, {"83", "JIS83"}}});
+    s_f.push_back({"GDCClock", K_LIST, "GDC クロック", "2.5", A_RESTART,
+                   {{"2.5", "2.5MHz（DIP SW 2-8 OFF）"}, {"5", "5MHz（DIP SW 2-8 ON）"}}});
     // 動作
     s_f.push_back({"CpuMHz", K_LIST, "CPU の速さ", "16", A_RESTART, num_opts({8, 10, 12, 16, 20, 25, 33, 40, 66, 75, 100, 133}, " MHz"), 1, 1000});
     s_f.push_back({"MouseSpeed", K_NUM, "マウスの速さ", "100", A_LIVE, {}, 10, 1000, "%"});
@@ -99,7 +101,7 @@ static void build_fields() {
     s_f.push_back({"Sound", K_CHECK, "FM 音源を鳴らす", "1", A_RESTART});
     s_f.push_back({"SampleRate", K_LIST, "サンプリング", "44100", A_RESTART, num_opts({22050, 44100, 48000}, " Hz")});
     // MIDI
-    s_f.push_back({"MIDI", K_CHECK, "MIDI を使う（MPU-PC98II を載せる）", "0", A_RESTART});
+    s_f.push_back({"MIDI", K_CHECK, "MIDI を使う（MPU-PC98II を載せる）", "1", A_RESTART});
 #ifdef _WIN32
     {
         std::vector<Opt> md = {{"-1", "既定（MIDI マッパー）"}};
@@ -140,6 +142,10 @@ static void read_ini_values() {
         } else if (f.kind == K_TEXT) v = raw;
         else v = raw.empty() ? f.def : std::to_string(one.geti("X.K", atoi(f.def.c_str())));
         if (SDL_strcasecmp(f.key, "Scale") == 0) { int s = ival(v, 2); v = std::to_string(s < 1 ? 1 : s > 8 ? 8 : s); }
+        if (SDL_strcasecmp(f.key, "GDCClock") == 0) {   // 2.5 は数として読むと 2 になるので、INI の文字のまま見る（core/player.cpp と同じ読み方）
+            std::string u = upper(raw);
+            v = (u == "5" || u == "5MHZ" || u == "5.0") ? "5" : "2.5";
+        }
         if (SDL_strcasecmp(f.key, "KanjiJIS") == 0) v = ival(v, 78) == 83 ? "83" : "78";
         f.init = f.cur = v;
         if (f.kind == K_LIST) {   // 一覧に無い値（INI に手で書いたもの）も選べるように足す
@@ -385,11 +391,11 @@ static void layout() {
     };
     // 左: 画面
     int y = 6;
-    s_groups.push_back({"画面", LX, y, GW, 22 + 6 * R + 4});
-    const char* scr[] = {"Scale", "Smooth", "FullScreen", "Font", "FontShift", "KanjiJIS"};
-    for (int i = 0; i < 6; i++) place(scr[i], LX + 10, y + 22 + i * R, 140, 222);
+    s_groups.push_back({"画面", LX, y, GW, 22 + 7 * R + 4});
+    const char* scr[] = {"Scale", "Smooth", "FullScreen", "Font", "FontShift", "KanjiJIS", "GDCClock"};
+    for (int i = 0; i < 7; i++) place(scr[i], LX + 10, y + 22 + i * R, 140, 222);
     // 左: 動作
-    y += 22 + 6 * R + 4 + 6;
+    y += 22 + 7 * R + 4 + 6;
     s_groups.push_back({"動作", LX, y, GW, 22 + 5 * R + 4});
     const char* act[] = {"CpuMHz", "MouseSpeed", "KeyRepeat", "PauseInactive", "ExitOnEnd"};
     for (int i = 0; i < 5; i++) place(act[i], LX + 10, y + 22 + i * R, 140, i == 1 ? 64 : 160);

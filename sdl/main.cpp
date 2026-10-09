@@ -28,6 +28,7 @@
 #include "../core/hdimage.h"
 #include "../core/opna_renderer.h"
 #include "hostfont.h"
+#include "../win32/version.h"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
@@ -699,7 +700,8 @@ static void draw_menu() {
         button(OT_REBOOT_X, FD_Y, OT_REBOOT_W, "R:再起動");
         button(OT_SET_X, FD_Y, OT_SET_W, "S:設定");
     }
-    if (!g_menu_note.empty()) ov_text(0, 356, RGBA(255, 120, 120), ov_fit(g_menu_note, 636), 640);
+    if (!g_menu_note.empty()) ov_text(0, 356, RGBA(255, 120, 120), ov_fit(g_menu_note, 548), 548);
+    ov_text(640 - 4 - ov_text_width("ver " PC98P_VER_STR), 356, RGBA(110, 110, 125), "ver " PC98P_VER_STR);   // 不具合の報告のときに版が分かるように
     ov_text(0, 380, RGBA(170, 170, 185), "カーソル/マウス:選ぶ  Enter/左クリック:決定  Esc/右クリック:やめる", 640);
     // フロッピーの小メニュー
     if (g_fd_sel >= 0) {
@@ -939,9 +941,15 @@ static void write_template_ini(const std::string& path, const std::string& start
       << "; 起動時に全画面（Alt+Enter でも切替）" << nl << "FullScreen=0" << nl
       << "; 拡大時になめらかにする（0=ドットのまま）" << nl << "Smooth=0" << nl
       << "; 仮想 CPU の速さ（MHz 相当）" << nl << "CpuMHz=16" << nl
+      << "; グラフィック GDC のクロック（DIP SW 2-8）。2.5 / 5。「GDC を 5MHz にしてください」と出るソフトは 5" << nl << "GDCClock=2.5" << nl
       << "; ゲームのフォルダを何ドライブに見せるか" << nl << "Drive=A" << nl
       << "; 音源ボード（86 / 26 / 0=なし）と割込み（3/10/12/13）" << nl << "SoundBoard=86" << nl << "SoundIRQ=12" << nl
-      << "; MIDI（MPU-PC98II, E0D0h）を載せる。ホストの MIDI 出力へ送るのは今は Windows だけ" << nl << "MIDI=0" << nl << "MidiDevice=-1" << nl
+#ifdef _WIN32
+      << "; MIDI（MPU-PC98II, E0D0h）を載せて Windows の MIDI 出力へ送る（MidiDevice=-1 は既定の出力）。0 で載せない（FM で聴きたいのに MIDI が選ばれるとき）" << nl << "MIDI=1" << nl << "MidiDevice=-1" << nl
+#else
+      // ホストの MIDI 出力は Windows だけ。ほかの OS は MidiSoundFont= が無いと MIDI を選んだゲームが無音になるので、既定は載せない
+      << "; MIDI（MPU-PC98II, E0D0h）を載せる。ホストの MIDI 出力へ送るのは今は Windows だけ（ほかの OS は MidiSoundFont= と一緒に 1 にする）" << nl << "MIDI=0" << nl << "MidiDevice=-1" << nl
+#endif
       << "; MIDI を SoundFont（.sf2）で鳴らす（どの OS でも。相対パスはゲームのフォルダから。空ならホストの MIDI 出力）" << nl << "MidiSoundFont=" << nl
       << "MidiSpeedFix=100" << nl
       << "; 音源ボード・MIDI・音量・画面などは、ゲーム中に F11 →「S: 設定」でも変えられる（この INI に保存される）" << nl
@@ -950,9 +958,12 @@ static void write_template_ini(const std::string& path, const std::string& start
       << "FloppyDisk=" << nl << "FloppyDrive=B" << nl
       << "GWDrive=A" << nl << "GWRevs=3" << nl
       << "; 起動時のカレントドライブ（空なら Start= のドライブ）と、ゲームのドライブの空き容量として見せる大きさ（MB）" << nl
-      << "CurrentDrive=" << nl << "FreeSpaceMB=96" << nl
+      << "CurrentDrive=" << nl
+      << "; 起動時のカレントディレクトリ（例 A:\\NANPA\\。ゲームのドライブに無ければ作る。空なら指定なし）" << nl << "CurrentDirectory=" << nl
+      << "FreeSpaceMB=96" << nl
       << "; EMS（EMM386 相当, ページフレーム D000h）と XMS（HIMEM.SYS 相当）。0 で無し" << nl
       << "EMS=1" << nl << "EMSKB=4096" << nl << "XMS=1" << nl << "XMSKB=8192" << nl
+      << "; 拡張メモリ（1MB より上の RAM、MB）。自分で保護モードに切り替えて使うゲーム向け（BIOS の 0401h に見せる）。0 で無し" << nl << "ExtMemMB=8" << nl
       << "; 先頭 MCB のセグメント（16 進、既定 0200）。動かないソフトで 0100〜0600 などを試す" << nl << "FirstMCB=0200" << nl
       << "; 2000 年問題対策: 年だけ置き換える（例 1998）/ 起動日を指定の日付にする（例 1999/12/31）。空なら今日" << nl
       << "FakeYear=" << nl << "FakeDate=" << nl
