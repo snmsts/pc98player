@@ -1,5 +1,31 @@
+# ビルドでできるもの（GitHub には上げない。EXE は Releases の zip で配る）
 out/
 build/
-/tools/harness
-/tools/harness.exe
+.vs/
+x64/
+# 注意: "Win32/" と書くと、Windows（大文字小文字を区別しない）ではソースの win32/ まで無視されるので書かない
+Debug/
+Release/
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.ipch
+*.tlog
+*.lastbuildstate
+*.user
+*.aps
+
+# tools\fetch_ymfm.cmd で取ってくる ymfm（BSD 3-Clause。同梱しない）
+third_party/ymfm/
+
+# 検証用ハーネスの出力
+tools/harness
+*.ppm
+*.wav
+PC98PLAYER.LOG
+
+# SDL 版のビルド出力
 build-sdl*/
