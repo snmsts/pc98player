@@ -38,7 +38,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: PC98PLAYER-${{ matrix.tag }}
-          path: out/dist/PC98PLAYER-${{ matrix.tag }}.${{ matrix.pkg }}
+          path: out/dist/PC98PLAYER_*_${{ matrix.tag }}.${{ matrix.pkg }}
 
   # Windows は本家の Win32（GDI）版を MSVC で。x64 は本家が配っているので、ビルドが通るかを見るだけで配布物にはしない
   windows:
@@ -57,8 +57,9 @@ jobs:
         if: matrix.arch == 'ARM64'
         shell: bash
         run: |
-          mkdir -p dist
-          cp -R build/Release/PC98PLAYER.exe README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual 設定INI作成.html dist/
+          d=dist/PC98PLAYER_$(sed -n 's/.*PC98P_VER_STR *"\(.*\)".*/\1/p' win32/version.h)_windows-${{ matrix.arch }}
+          mkdir -p "$d"
+          cp -R build/Release/PC98PLAYER.exe CHANGELOG.md README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual samples 設定INI作成.html "$d"/
       - uses: actions/upload-artifact@v7
         if: matrix.arch == 'ARM64'
         with:

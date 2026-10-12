@@ -21,6 +21,9 @@ SRC  := out/src
 B    := out/build/$(TAG)
 DEPS := $(abspath $(B)/deps)
 DIST := out/dist
+# 配布物の名前は本家の zip（PC98PLAYER_<版>）に合わせ、後ろに OS とアーキテクチャを付ける
+VER  := $(shell sed -n 's/.*PC98P_VER_STR *"\(.*\)".*/\1/p' win32/version.h)
+PKG  := PC98PLAYER_$(VER)_$(TAG)
 
 # 手元の LDFLAGS など（Homebrew の llvm@14 など）を持ち込まない
 unexport LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH
@@ -74,24 +77,24 @@ $(DEPS)/lib/libfreetype.a: $(SRC)/freetype/CMakeLists.txt
 dist: ymfm deps
 	$(VENDOR_ENV) cmake -S sdl -B $(B)/app $(CMAKE_COMMON) $(VENDOR_FLAGS) -DFREETYPE_DIR=$(DEPS) $(APP_FLAGS)
 	cmake --build $(B)/app -j$(JOBS)
-	rm -rf $(DIST)/$(TAG) && mkdir -p $(DIST)/$(TAG)
-	cp -R $(B)/app/$(APP) README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual 設定INI作成.html $(DIST)/$(TAG)/
-	cp $(SRC)/SDL/LICENSE.txt $(DIST)/$(TAG)/THIRD-PARTY-SDL3-LICENSE.txt
-	cp $(SRC)/freetype/docs/FTL.TXT $(DIST)/$(TAG)/THIRD-PARTY-FreeType-LICENSE.txt
-	cp third_party/TinySoundFont/LICENSE $(DIST)/$(TAG)/THIRD-PARTY-TinySoundFont-LICENSE.txt
+	rm -rf $(DIST)/$(PKG) && mkdir -p $(DIST)/$(PKG)
+	cp -R $(B)/app/$(APP) CHANGELOG.md README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual samples 設定INI作成.html $(DIST)/$(PKG)/
+	cp $(SRC)/SDL/LICENSE.txt $(DIST)/$(PKG)/THIRD-PARTY-SDL3-LICENSE.txt
+	cp $(SRC)/freetype/docs/FTL.TXT $(DIST)/$(PKG)/THIRD-PARTY-FreeType-LICENSE.txt
+	cp third_party/TinySoundFont/LICENSE $(DIST)/$(PKG)/THIRD-PARTY-TinySoundFont-LICENSE.txt
 ifeq ($(OS),macos)
-	codesign --force --sign - $(DIST)/$(TAG)/$(APP)
-	cd $(DIST) && rm -f PC98PLAYER-$(TAG).zip && ditto -c -k --keepParent $(TAG) PC98PLAYER-$(TAG).zip
+	codesign --force --sign - $(DIST)/$(PKG)/$(APP)
+	cd $(DIST) && rm -f $(PKG).zip && ditto -c -k --keepParent $(PKG) $(PKG).zip
 else
-	cd $(DIST) && tar czf PC98PLAYER-$(TAG).tar.gz $(TAG)
+	cd $(DIST) && tar czf $(PKG).tar.gz $(PKG)
 endif
 	@$(MAKE) --no-print-directory info
 
 info:
 ifeq ($(OS),macos)
-	@B=$(DIST)/$(TAG)/$(APP)/Contents/MacOS/PC98PLAYER; otool -L $$B; lipo -info $$B; otool -l $$B | grep -A3 LC_BUILD_VERSION | grep minos
+	@B=$(DIST)/$(PKG)/$(APP)/Contents/MacOS/PC98PLAYER; otool -L $$B; lipo -info $$B; otool -l $$B | grep -A3 LC_BUILD_VERSION | grep minos
 else
-	@B=$(DIST)/$(TAG)/$(APP); ldd $$B; file $$B
+	@B=$(DIST)/$(PKG)/$(APP); ldd $$B; file $$B
 endif
 
 ymfm:
@@ -99,6 +102,6 @@ ymfm:
 .PHONY: ymfm
 
 clean:
-	rm -rf $(B)/sdl $(B)/app $(DIST)/$(TAG) $(DIST)/PC98PLAYER-$(TAG).*
+	rm -rf $(B)/sdl $(B)/app $(DIST)/$(PKG) $(DIST)/$(PKG).*
 distclean:
 	rm -rf out/build out/src $(DIST)
