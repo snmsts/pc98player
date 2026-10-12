@@ -1,5 +1,5 @@
 # PC98PLAYER の SDL3 版（Windows / macOS / Linux）
-#   cmake -S sdl -B build-sdl -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-sdl
+#   cmake -S sdl -B build/sdl -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build/sdl
 # 上の階層の CMakeLists.txt（Windows 版）とは別のプロジェクトにしてある
 cmake_minimum_required(VERSION 3.16)
 project(PC98PLAYER_SDL CXX)

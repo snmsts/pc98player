@@ -26,6 +26,3 @@ tools/harness
 *.ppm
 *.wav
 PC98PLAYER.LOG
-
-# SDL 版のビルド出力
-build-sdl*/

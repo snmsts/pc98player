@@ -601,6 +601,7 @@ static void do_reboot() {
     codeedit::on_reboot();
     menu_close();
     if (!g_p->floppy_error.empty()) show_toast(g_p->floppy_error);
+    else if (!g_p->rhythm_error.empty()) show_toast(g_p->rhythm_error);
     else if (!rerr.empty()) show_toast(rerr);
     else show_toast(reloaded ? "INI を読み直して、プログラムを起動し直しました" : "プログラムを起動し直しました");
     update_title();
@@ -1386,6 +1387,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     g_ev_dialog = SDL_RegisterEvents(1);
+    { extern std::string g_app_dir; const char* bp = SDL_GetBasePath(); g_app_dir = U8(app_dir(norm(P(bp ? bp : ".")))); }   // リズム音源の ROM などをアプリを置いたフォルダでも探す
     std::error_code ec;
     fs::path dir, ini_path;
     if (!find_game(argc, argv, &dir, &ini_path)) { SDL_Quit(); return 0; }
@@ -1444,6 +1446,7 @@ int main(int argc, char** argv) {
     update_title();
     if (!font_ok) show_toast(ferr);
     if (!g_p->floppy_error.empty()) show_toast(g_p->floppy_error);
+    else if (!g_p->rhythm_error.empty()) show_toast(g_p->rhythm_error);
     else if (!startup_note.empty()) show_toast(startup_note);
     if (g_ini_memedit) {   // メモリエディタを別の窓で開く（本体の窓の右に並べる）
         memedit::show();
