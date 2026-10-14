@@ -601,6 +601,7 @@ static void do_reboot() {
     codeedit::on_reboot();
     menu_close();
     if (!g_p->floppy_error.empty()) show_toast(g_p->floppy_error);
+    else if (!g_p->cd_error.empty()) show_toast(g_p->cd_error);
     else if (!g_p->rhythm_error.empty()) show_toast(g_p->rhythm_error);
     else if (!rerr.empty()) show_toast(rerr);
     else show_toast(reloaded ? "INI を読み直して、プログラムを起動し直しました" : "プログラムを起動し直しました");
@@ -1446,6 +1447,7 @@ int main(int argc, char** argv) {
     update_title();
     if (!font_ok) show_toast(ferr);
     if (!g_p->floppy_error.empty()) show_toast(g_p->floppy_error);
+    else if (!g_p->cd_error.empty()) show_toast(g_p->cd_error);
     else if (!g_p->rhythm_error.empty()) show_toast(g_p->rhythm_error);
     else if (!startup_note.empty()) show_toast(startup_note);
     if (g_ini_memedit) {   // メモリエディタを別の窓で開く（本体の窓の右に並べる）
