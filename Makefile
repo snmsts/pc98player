@@ -78,7 +78,7 @@ dist: ymfm deps
 	$(VENDOR_ENV) cmake -S sdl -B $(B)/app $(CMAKE_COMMON) $(VENDOR_FLAGS) -DFREETYPE_DIR=$(DEPS) $(APP_FLAGS)
 	cmake --build $(B)/app -j$(JOBS)
 	rm -rf $(DIST)/$(PKG) && mkdir -p $(DIST)/$(PKG)
-	cp -R $(B)/app/$(APP) CHANGELOG.md README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual samples 設定INI作成.html $(DIST)/$(PKG)/
+	cp -R $(B)/app/$(APP) CHANGELOG.md README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt THIRD-PARTY-dr_libs-LICENSE.txt PC98PLAYER_MANUAL.html manual samples 設定INI作成.html $(DIST)/$(PKG)/
 	cp $(SRC)/SDL/LICENSE.txt $(DIST)/$(PKG)/THIRD-PARTY-SDL3-LICENSE.txt
 	cp $(SRC)/freetype/docs/FTL.TXT $(DIST)/$(PKG)/THIRD-PARTY-FreeType-LICENSE.txt
 	cp third_party/TinySoundFont/LICENSE $(DIST)/$(PKG)/THIRD-PARTY-TinySoundFont-LICENSE.txt

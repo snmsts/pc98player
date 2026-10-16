@@ -59,7 +59,7 @@ jobs:
         run: |
           d=dist/PC98PLAYER_$(sed -n 's/.*PC98P_VER_STR *"\(.*\)".*/\1/p' win32/version.h)_windows-${{ matrix.arch }}
           mkdir -p "$d"
-          cp -R build/Release/PC98PLAYER.exe CHANGELOG.md README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt PC98PLAYER_MANUAL.html manual samples 設定INI作成.html "$d"/
+          cp -R build/Release/PC98PLAYER.exe CHANGELOG.md README.md LICENSE THIRD-PARTY-ymfm-LICENSE.txt THIRD-PARTY-dr_libs-LICENSE.txt PC98PLAYER_MANUAL.html manual samples 設定INI作成.html "$d"/
       - uses: actions/upload-artifact@v7
         if: matrix.arch == 'ARM64'
         with:

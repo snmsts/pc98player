@@ -1521,7 +1521,8 @@ int main(int argc, char** argv) {
                 bool last = now() - t0 >= 1.0 / 60 || i == 63;
                 codeedit::tick();   // 書き込み続けるコード（%）
                 g_p->run_frame(last, false);
-                if (last || g_p->m->quit) break;
+                if (last) break;
+                if (g_p->m->quit) { g_p->run_frame(true, false); break; }   // 終わった: 最後の画面を描いてから抜ける（描かずに抜けると、早送りの間は画面が止まったままに見える）
             }
             if (g_audio && SDL_GetAudioStreamQueued(g_audio) > 0) audio_flush();
         } else {

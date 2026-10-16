@@ -125,6 +125,7 @@ static void build_fields() {
     s_f.push_back({"SSGVolume", K_VOL, "SSG（PSG）", "100", A_LIVE, {}, 0, 1000, "%"});
     s_f.push_back({"PCMVolume", K_VOL, "PCM（86 音源）", "100", A_LIVE, {}, 0, 1000, "%"});
     s_f.push_back({"BeepVolume", K_VOL, "ビープ", "50", A_LIVE, {}, 0, 1000, "%"});
+    s_f.push_back({"CDDAVolume", K_VOL, "CD-DA（CD の音楽）", "100", A_LIVE, {}, 0, 1000, "%"});
 }
 
 // INI の今の値（無ければ既定）。チェックと数は読み方（YES / x2 など）をそろえる
@@ -184,6 +185,7 @@ static void apply_live(const Field& f) {
 #endif
     else if (k == "Volume") ps.volume = clampv(v, 0, 1000);
     else if (k == "PCMVolume") ps.pcm_volume = clampv(v, 0, 1000);
+    else if (k == "CDDAVolume") ps.cdda_volume = clampv(v, 0, 1000);
     else if (k == "BeepVolume") ps.beep_volume = clampv(v, 0, 1000);
     else if (k == "FMVolume" || k == "SSGVolume") {
         if (k == "FMVolume") ps.fm_volume = clampv(v, 0, 1000); else ps.ssg_volume = clampv(v, 0, 1000);
@@ -419,8 +421,8 @@ static void layout() {
     // 下: 音量（2 列）
     y = std::max(left_end, right_end) + 6;
     s_groups.push_back({"音量（変えるとすぐ聞こえます）", LX, y, W - 24, 22 + 3 * R + 4});
-    const char* vol[] = {"Volume", "FMVolume", "SSGVolume", "PCMVolume", "BeepVolume"};
-    for (int i = 0; i < 5; i++) place(vol[i], (i % 2 ? RX : LX) + 10, y + 22 + (i / 2) * R, 120, 230);
+    const char* vol[] = {"Volume", "FMVolume", "SSGVolume", "PCMVolume", "BeepVolume", "CDDAVolume"};
+    for (int i = 0; i < 6; i++) place(vol[i], (i % 2 ? RX : LX) + 10, y + 22 + (i / 2) * R, 120, 230);
 }
 // 音量のつまみの範囲（部品の左側）
 static const int VOL_SB_W = 160;
