@@ -2,6 +2,7 @@
 // -----------------------------------------------------------------------------
 //  machine.cpp  --  仮想 PC-9801 のデバイスと時間軸
 // -----------------------------------------------------------------------------
+#include "debugdump.h"
 #include "machine.h"
 #include "floppy.h"
 #include <string.h>
@@ -93,6 +94,13 @@ void machine_raise_irq(Machine* m, int irq) {
     if (irq < 0 || irq > 15) return;
     if (irq < 8) m->pic[0].irr |= (uint8_t)(1u << irq);
     else { m->pic[1].irr |= (uint8_t)(1u << (irq - 8)); m->pic[0].irr |= 0x80; }
+    pic_update_hint(m);
+}
+// 割込みの線が下がった（受け付ける前なら要求を取り下げる。8259 は線が下がると IRR も消える）
+void machine_lower_irq(Machine* m, int irq) {
+    if (irq < 0 || irq > 15) return;
+    if (irq < 8) m->pic[0].irr &= (uint8_t)~(1u << irq);
+    else { m->pic[1].irr &= (uint8_t)~(1u << (irq - 8)); if (!m->pic[1].irr) m->pic[0].irr &= (uint8_t)~0x80; }
     pic_update_hint(m);
 }
 void machine_eoi(Machine* m, int irq) {
@@ -442,7 +450,9 @@ static void cg_write(Machine* m, uint32_t idx, uint8_t v);
 // ---- MPU-PC98II -------------------------------------------------------------
 static void mpu_push(Machine* m, uint8_t v) {
     Mpu& u = m->mpu;
-    if (u.rcnt < sizeof(u.recv)) { u.recv[(u.rpos + u.rcnt) & 15] = v; u.rcnt++; }
+    if (v == 0xFD && u.rcnt >= 8) return;   // クロック・トゥ・ホストは、読まれずにたまっているときは捨てる（ACK を入れる場所を残す）
+    if (u.rcnt >= sizeof(u.recv)) { u.rpos = (u.rpos + 1) & 15; u.rcnt--; }   // いっぱいなら古いものを捨てる（ACK の FEh を落とさない）
+    u.recv[(u.rpos + u.rcnt) & 15] = v; u.rcnt++;
     machine_raise_irq(m, m->cfg.midi_irq);
 }
 static void mpu_defaults(Mpu& u) {
@@ -524,6 +534,9 @@ void mpu_advance(Machine* m, uint32_t t) {
 static uint8_t mpu_read_data(Machine* m) {
     Mpu& u = m->mpu;
     if (u.rcnt) { u.last = u.recv[u.rpos]; u.rpos = (u.rpos + 1) & 15; u.rcnt--; }
+    // MPU の割込みの線は、受信データがある間だけ上がっている。読み終えたら下げる
+    //（割込みの中で ACK を読み終えたあとに要求が残ると、もう一度割込みに入って、来ないデータを待ち続けるドライバがある）
+    if (!u.rcnt) machine_lower_irq(m, m->cfg.midi_irq);
     return u.last;
 }
 
@@ -641,6 +654,7 @@ static bool unknown_io_log(Machine* m, uint16_t port);
 uint8_t io_in8(Machine* m, uint16_t port) {
     g_side_fx++;
     uint8_t v = io_in8_(m, port);
+    if (g_dbg_on) dbg_note_io(m, port, v, false, false);
     { extern unsigned* g_stall_port; if (g_stall_port) g_stall_port[port]++; }
     if (port >= g_trace_port_lo && port <= g_trace_port_hi && s_port_log++ < 3000) plog("[in ] %04X -> %02X @%04X:%04X\n", port, v, m->cpu.op_cs, m->cpu.op_ip);
     return v;
@@ -713,6 +727,7 @@ static bool unknown_io_log(Machine* m, uint16_t port) {
 }
 void io_out8(Machine* m, uint16_t port, uint8_t v) {
     g_side_fx++;
+    if (g_dbg_on) dbg_note_io(m, port, v, true, false);
     if (port >= g_trace_port_lo && port <= g_trace_port_hi && s_port_log++ < 3000) plog("[out] %04X <- %02X @%04X:%04X\n", port, v, m->cpu.op_cs, m->cpu.op_ip);
     switch (port) {
     case 0x00: pic_write(m, 0, 0, v); return;
@@ -814,6 +829,7 @@ void io_out16(Machine* m, uint16_t port, uint16_t v) {
     g_side_fx++;
     if (port >= 0x4A0 && port <= 0x4AF) {
         if (port >= g_trace_port_lo && port <= g_trace_port_hi && s_port_log++ < 3000) plog("[out] %04X <- %04X (w) @%04X:%04X\n", port, v, m->cpu.op_cs, m->cpu.op_ip);
+        if (g_dbg_on) dbg_note_io(m, port, v, true, true);
         egc_out16(m, port, v); return; }
     io_out8(m, port, (uint8_t)v);
     io_out8(m, (uint16_t)(port + 1), (uint8_t)(v >> 8));
@@ -826,7 +842,7 @@ void hle_trap(Machine* m, uint8_t n) {
     switch (n) {
     case HLE_INT20: case HLE_INT21: case HLE_INT25: case HLE_INT26: case HLE_INT27:
     case HLE_INT28: case HLE_INT29: case HLE_INT2F: case HLE_INT67: case HLE_XMS:
-    case HLE_SHELL: case HLE_EXIT:
+    case HLE_SHELL: case HLE_EXIT: case HLE_DEVINIT:
         dos_hle(m, n); break;
     default:
         bios_hle(m, n); break;
