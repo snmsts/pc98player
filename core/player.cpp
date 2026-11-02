@@ -250,6 +250,11 @@ bool player_settings_from_ini(const Ini& ini, const std::string& root, PlayerSet
         ps->cfg.ems_from_config = true;
     } else ps->cfg.ems = I("EMS", 1) != 0;
     ps->cfg.ems_kb = I("EMSKB", 4096);
+    ps->cfg.pc9821 = I("PC9821", 0) != 0;
+    ps->cfg.video_colors = I("VideoColors", 16) == 256 ? 256 : 16;   // 256 色の PR の書き方（PC9821=1 と同じ）
+    if (ps->cfg.video_colors == 256) ps->cfg.pc9821 = true;
+    ps->cfg.pc9821_ask = G("PC9821", "").empty() && ps->cfg.video_colors != 256;
+    { std::string f = G("EMSFrame", ""); ps->cfg.ems_frame = (!f.empty() && (f[0] == 'C' || f[0] == 'c')) ? 0xC000 : 0xD000; }
     if (ps->cfg.ems_kb < 16) ps->cfg.ems = false;
     if (ps->cfg.ems_kb > 32768) ps->cfg.ems_kb = 32768;
     ps->cfg.xms_kb = I("XMS", 1) ? I("XMSKB", 8192) : 0;
@@ -396,6 +401,14 @@ bool Player::init(const PlayerSettings& s, std::string* err) {
     floppy::set_drive_letter(ps.cfg.floppy_drive);   // DOS のドライブ表を作る前に決めておく
     floppy::set_drive_letter_unit(1, ps.cfg.boot_fd ? 0 : ps.cfg.floppy_drive2);
     m = machine_create(ps.cfg);
+    m->ask_pc9821_user = this;
+    m->ask_pc9821 = [](void* u) -> bool {
+        Player* p = (Player*)u;
+        bool yes = p->ask_pc9821 ? p->ask_pc9821(p->ask_pc9821_user) : false;
+        p->ps.cfg.pc9821 = yes;
+        p->ps.cfg.pc9821_ask = false;
+        return yes;
+    };
     floppy::eject();
     if (!ps.cfg.floppy_image.empty()) {
         std::string e;
@@ -677,13 +690,13 @@ void Player::run_frame(bool render_video, bool render_audio) {
     if (render_audio) sample_acc -= (double)(t1 - t0);
     else cdda::skip_seconds((double)(t1 - t0) / MASTER_CLOCK);   // 早送り: CD-DA の位置だけ進める
     if (render_video) {
-        video_render(m, fb);
+        fb_h = video_render(m, fb);
         // INT 33h のカーソル（AX=1 で表示にしたゲームだけ）。実機のドライバと同じ形を VRAM ではなく画面に重ねる
         if (m->cfg.emulate_mouse && m->mdrv.show >= 0) {
             int ox = m->mouse.x - m->mdrv.hot_x, oy = m->mouse.y - m->mdrv.hot_y;
             for (int yy = 0; yy < 16; yy++) {
                 int py = oy + yy;
-                if (py < 0 || py >= 400) continue;
+                if (py < 0 || py >= fb_h) continue;
                 uint16_t am = m->mdrv.shape[yy], xm = m->mdrv.shape[16 + yy];
                 for (int xx = 0; xx < 16; xx++) {
                     int px = ox + xx;
@@ -781,7 +794,7 @@ bool Player::restore(const uint8_t* data, size_t len) {
         opna->reload_from_registers(m->opna.reg[0], m->opna.reg[1]);
         for (int ch = 0; ch < 8; ch++) if ((ch & 3) != 3 && m->opna.keyon[ch]) opna->write(0, 0x28, (uint8_t)(m->opna.keyon[ch] | ch));
     }
-    video_render(m, fb);
+    fb_h = video_render(m, fb);
     return true;
 }
 

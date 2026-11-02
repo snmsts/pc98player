@@ -49,7 +49,8 @@ struct Player {
     PlayerSettings ps;
     Machine* m = nullptr;
     OpnaRenderer* opna = nullptr;
-    uint32_t fb[640 * 400];
+    uint32_t fb[640 * 480];         // 画面（640 ドット幅。行数は fb_h）
+    int      fb_h = 400;            // 今の画面の行数（PC-9821 の 640x480 なら 480）
     std::vector<int16_t> audio;     // 直近フレームぶん（ステレオ交互）
     double sample_acc = 0;
     double beep_phase = 0;
@@ -65,6 +66,10 @@ struct Player {
     // MIDI の出口（ホストが設定）。完結したメッセージ（SysEx は F0..F7 まるごと）を渡す
     void (*midi_sink)(void* user, const uint8_t* msg, int len) = nullptr;
     void* midi_user = nullptr;
+    // PC9821= が無いのに PC-9821 らしいアクセスがあったときに尋ねる（ホストが設定）。true で PC-9821 にする。
+    // 答えは ps にも残し、起動し直しても尋ね直さない
+    bool (*ask_pc9821)(void* user) = nullptr;
+    void* ask_pc9821_user = nullptr;
     uint8_t midi_status = 0, midi_need = 0;
     std::vector<uint8_t> midi_msg;
     void midi_feed(uint8_t b);

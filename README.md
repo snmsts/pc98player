@@ -13,7 +13,7 @@ GMPV3 Studio の「必要なデバイスの振る舞いと DOS ファンクシ�
 ゲームのフォルダ\
     KAKYU.BAT, AI5.EXE, PLAY5.COM ...   ← PC-98 のゲーム（HDD インストール済みのもの）
     PC98PLAYER.EXE                        ← これを置く
-    PC98PLAYER.INI                        ← 設定（無ければ初回起動時に、最初に実行するファイルを選んで作ります）
+    PC98PLAYER.INI                        ← 設定（無ければ初回起動時に作ります。実行ファイルが 1 個だけなら自動、それ以外は選びます）
 ```
 
 `PC98PLAYER.EXE` をダブルクリックすると窓が開き、INI の `Start=` に書いたプログラムまたはバッチから動き出します。
@@ -118,6 +118,8 @@ GDCClock=2.5         ; グラフィック GDC のクロック（DIP SW 2-8）。
 FreeSpaceMB=96       ; ゲームのドライブの空き容量として見せる大きさ（MB）
 MidiSpeedFix=100     ; MIDI の演奏速度 %（10〜1000。MPU のテンポ＝クロック・トゥ・ホストだけを速める）
 EMS=1                ; EMS（EMM386 相当）。EMSKB=4096 で容量。書かなければ CONFIG.SYS の NOEMS に従う
+EMSFrame=D000        ; EMS のページフレームのセグメント。D000 / C000（C000h を前提にする PC-9821 用のソフト向け）
+PC9821=              ; 1 で PC-9821（256 色あり）、0 で PC-9801（256 色なし）。書かなければ、ソフトが PC-9821 か調べたときに尋ねて INI に書く（VideoColors=256 も PC9821=1 と同じ）
 LoadDevices=1        ; 起動ドライブの CONFIG.SYS の DEVICE= のドライバ（MIDI・音楽のドライバなど）を組み込む（0 で組み込まない）
 AVSDRV=              ; PC-9821 の PCM ドライバ AVSDRV.SYS の代わり（INT D9h）。書かなければ CONFIG.SYS にあるときだけ。1 でいつも、0 で用意しない
 XMS=1                ; XMS（HIMEM.SYS 相当）。XMSKB=8192 で容量
@@ -267,8 +269,10 @@ PC-98 の漢字 ROM・ANK ROM を、**本物の ROM も第三者のビットマ�
 - ADPCM（86 ボード＋ちびおと、SPB 等の ADPCM RAM）
 - MPU-PC98II のインテリジェントモードの演奏機能（UART モードと、D0h 系の直接送信・問い合わせのみ対応）
 - 保護モードのうち、ページング・仮想 86 モード・タスク切り替え、VCPI/DPMI（EMM386 の下で動く DOS エクステンダ）。自分で保護モードに切り替えて拡張メモリを使うソフトは動きます（`ExtMemMB=`）
-- 256 色（PEGC）、31kHz 表示
+- PEGC の 1MB より上に見せる VRAM（F00000h～）
 - N88-BASIC(86)（ROM）で動くソフト（ブートモードで ROM の BASIC を呼ぶと、その旨を表示して終了）
+
+256 色（PC-9821 の PEGC）の対応範囲と試験は [docs/256-color.md](docs/256-color.md) を参照してください。
 
 ## 配布とバージョン
 
