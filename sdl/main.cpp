@@ -725,10 +725,13 @@ static void draw_toast() {
 }
 
 static void present() {
-    SDL_UpdateTexture(g_tex, nullptr, g_p->fb, 640 * 4);
+    // 640x480（PC-9821 の 31kHz）も、実機のモニタと同じく 640x400 と同じ大きさに縦を縮めて映す
+    const SDL_Rect ur = {0, 0, 640, g_p->fb_h == 480 ? 480 : 400};
+    const SDL_FRect sr = {0, 0, 640, (float)ur.h};
+    SDL_UpdateTexture(g_tex, &ur, g_p->fb, 640 * 4);
     SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255);
     SDL_RenderClear(g_ren);
-    SDL_RenderTexture(g_ren, g_tex, nullptr, nullptr);
+    SDL_RenderTexture(g_ren, g_tex, &sr, nullptr);
     bool toast = SDL_GetTicks() < g_toast_until;
     if (g_menu != MENU_NONE || toast) {
         std::fill(g_ov.begin(), g_ov.end(), 0);
@@ -932,6 +935,25 @@ static std::string guess_start(const std::string& dir) {
     if (!exes.empty()) return exes[0];
     return "";
 }
+// INI が無いとき、迷わず決められるか: フォルダ（直下）にバッチファイル（.BAT）が無く、
+// 実行ファイル（.EXE・.COM。PC98PLAYER* は除く）がちょうど 1 個なら、そのファイル名。
+// それ以外は空 = これまでどおり guess_start で推測して知らせる
+static std::string single_start(const std::string& dir) {
+    std::error_code ec;
+    std::vector<std::string> exes;
+    for (auto& de : fs::directory_iterator(P(dir), ec)) {
+        if (!de.is_regular_file(ec)) continue;
+        std::string n = upper(U8(de.path().filename()));
+        size_t d = n.rfind('.');
+        if (d == std::string::npos) continue;
+        std::string ext = n.substr(d), base = n.substr(0, d);
+        if (ext == ".BAT") return "";
+        if ((ext == ".EXE" || ext == ".COM") && base.compare(0, 10, "PC98PLAYER") != 0) exes.push_back(n);
+    }
+    if (exes.size() != 1) return "";
+    for (unsigned char c : exes[0]) if (c >= 0x80) return "";   // 日本語の名前のホストのプログラムなど（MS-DOS のプログラムではない）
+    return exes[0];
+}
 static void write_template_ini(const std::string& path, const std::string& start) {
     const char* nl = "\r\n";
     std::ostringstream t;
@@ -963,8 +985,11 @@ static void write_template_ini(const std::string& path, const std::string& start
       << "CurrentDrive=" << nl
       << "; 起動時のカレントディレクトリ（例 A:\\NANPA\\。ゲームのドライブに無ければ作る。空なら指定なし）" << nl << "CurrentDirectory=" << nl
       << "FreeSpaceMB=96" << nl
-      << "; EMS（EMM386 相当, ページフレーム D000h）と XMS（HIMEM.SYS 相当）。0 で無し" << nl
-      << "EMS=1" << nl << "EMSKB=4096" << nl << "XMS=1" << nl << "XMSKB=8192" << nl
+      << "; EMS（EMM386 相当）と XMS（HIMEM.SYS 相当）。0 で無し" << nl
+      << "EMS=1" << nl << "EMSKB=4096" << nl
+      << "; EMS のページフレーム（D000 / C000。C000h を前提にする PC-9821 用のソフトでは C000）" << nl << "EMSFrame=D000" << nl
+      << "; 1 で PC-9821 として見せる（BIOS の 045Ch bit6 = 256 色あり）。書かなければ、ソフトが PC-9821 か調べたときに尋ねる" << nl << ";PC9821=0" << nl
+      << "XMS=1" << nl << "XMSKB=8192" << nl
       << "; 拡張メモリ（1MB より上の RAM、MB）。自分で保護モードに切り替えて使うゲーム向け（BIOS の 0401h に見せる）。0 で無し" << nl << "ExtMemMB=8" << nl
       << "; 先頭 MCB のセグメント（16 進、既定 0200）。動かないソフトで 0100〜0600 などを試す" << nl << "FirstMCB=0200" << nl
       << "; 2000 年問題対策: 年だけ置き換える（例 1998）/ 起動日を指定の日付にする（例 1999/12/31）。空なら今日" << nl
@@ -1378,6 +1403,21 @@ static void build_disk_list() {
 
 #include "settings.inc"
 
+// INI に PC9821= が無いのに、ソフトが PC-9821 かどうかを調べた・256 色を使おうとした。
+// その場で尋ね、答えを INI に書く（次からは尋ねない）。ソフトは「はい」の答えをそのまま読む
+static bool ask_pc9821(void*) {
+    set_capture(false);
+    bool yes = ask_yes_no("PC98PLAYER - PC-9821 の 256 色モード",
+        "このソフトウェアは PC-9821 の 256 色モードに対応しているようです。\n"
+        "PC-9821 として動かしますか？\n\n"
+        "「はい」: PC-9821 として動かします（INI に PC9821=1 を書きます）\n"
+        "「いいえ」: これまでどおり PC-9801 として動かします（INI に PC9821=0 を書きます）\n\n"
+        "あとから変えるときは、INI の PC9821= を書き換えてください。");
+    std::string err;
+    if (!g_ini_path.empty() && !settingsdlg::write_ini({{"PC9821", yes ? "1" : "0"}}, &err)) show_toast(err);
+    return yes;
+}
+
 int main(int argc, char** argv) {
     SDL_SetHint(SDL_HINT_APP_NAME, "PC98PLAYER");
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "512");
@@ -1392,6 +1432,11 @@ int main(int argc, char** argv) {
     std::error_code ec;
     fs::path dir, ini_path;
     if (!find_game(argc, argv, &dir, &ini_path)) { SDL_Quit(); return 0; }
+    if (!fs::exists(ini_path, ec) && !g_boot_override.on) {
+        // バッチファイルが無く、実行ファイルが 1 個だけなら、それを Start= にした INI を何も聞かずに作ってそのまま起動する
+        std::string one = single_start(U8(dir));
+        if (!one.empty()) write_template_ini(U8(ini_path), one);
+    }
     if (!fs::exists(ini_path, ec) && !g_boot_override.on) {
         std::string st = guess_start(U8(dir));
         write_template_ini(U8(ini_path), st);
@@ -1431,13 +1476,14 @@ int main(int argc, char** argv) {
     g_ren = g_win ? SDL_CreateRenderer(g_win, nullptr) : nullptr;
     if (!g_ren) { message(SDL_MESSAGEBOX_ERROR, std::string("窓を作れません: ") + SDL_GetError()); return 1; }
     SDL_SetRenderLogicalPresentation(g_ren, 640, 400, SDL_LOGICAL_PRESENTATION_LETTERBOX);
-    g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, 640, 400);
+    g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, 640, 480);   // 下 80 行は 640x480 のときだけ使う
     g_ovl = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 640, 400);
     SDL_SetTextureScaleMode(g_tex, ps.smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
     SDL_SetTextureScaleMode(g_ovl, SDL_SCALEMODE_NEAREST);
     SDL_SetTextureBlendMode(g_ovl, SDL_BLENDMODE_BLEND);
 
     g_p = new Player();
+    g_p->ask_pc9821 = ask_pc9821;
     std::string err;
     if (!g_p->init(ps, &err)) { message(SDL_MESSAGEBOX_ERROR, err); return 1; }
     if (ps.cfg.boot_fd || !ps.cfg.floppy_image2.empty()) build_disk_list();
