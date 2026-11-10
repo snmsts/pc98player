@@ -315,8 +315,19 @@ static void ov_text(int x, int y, uint32_t c, const std::string& utf8, int cente
 }
 
 // ---- マウスの捕獲・タイトル ----------------------------------------------------------
+static int g_title_mhz = 0;   // タイトルに出している CPU の速さ（MHz。0 = まだ）
 static void update_title() {
-    std::string t = g_title + "  [F11: ロード / Shift+F11: セーブ]";
+    std::string t = g_title;
+    if (g_p && g_p->m) {   // CPU の速さ（自動調整で下げているときは「いま / 設定」）
+        int set = g_p->ps.cfg.cpu_mhz > 0 ? g_p->ps.cfg.cpu_mhz : 8;
+        int now = (int)((g_p->m->cpu_hz + 500000u) / 1000000u);
+        g_title_mhz = now;
+        char b[48];
+        if (now < set) snprintf(b, sizeof b, "  [CPU %d/%dMHz]", now, set);
+        else snprintf(b, sizeof b, "  [CPU %dMHz]", set);
+        t += b;
+    }
+    t += "  [F11: ロード / Shift+F11: セーブ]";
     if (g_mouse_lock_disable) {}
     else if (g_mouse_shared) t += "  [マウス: 画面の上で動かす]";
     else if (g_captured) t += "  [マウス使用中: F12 で解放]";
@@ -373,8 +384,8 @@ struct FdItem { std::string label; int id; bool enabled; std::string spec; };
 static std::vector<FdItem> g_fd_items;
 static int  g_fd_sel = -1;           // -1 = 閉じている
 static const int FDM_X = 20, FDM_W = 400, FDM_IH = 18;
-enum { FD_PICK = 1, FD_GW = 2, FD_REREAD = 3, FD_SAVE = 4, FD_FOLDER = 5, FD_WPROT = 6, FD_DEV = 100, FD_LIST = 200 };
-enum { DLG_INSERT = 1, DLG_SAVE_D88 = 2, DLG_FOLDER = 3, DLG_FD_FOLDER = 4 };
+enum { FD_PICK = 1, FD_GW = 2, FD_REREAD = 3, FD_SAVE = 4, FD_FOLDER = 5, FD_WPROT = 6, FD_SAVE_SCP = 7, FD_DEV = 100, FD_LIST = 200 };
+enum { DLG_INSERT = 1, DLG_SAVE_D88 = 2, DLG_FOLDER = 3, DLG_FD_FOLDER = 4, DLG_SAVE_SCP = 5 };
 
 static void show_toast(const std::string& t) { g_toast = t; g_toast_until = SDL_GetTicks() + 2500; }
 
@@ -445,6 +456,7 @@ static const SDL_DialogFileFilter k_fd_filters[] = {
     {"すべてのファイル", "*"},
 };
 static const SDL_DialogFileFilter k_d88_filter[] = { {"D88 イメージ", "d88"} };
+static const SDL_DialogFileFilter k_scp_filter[] = { {"SCP イメージ", "scp"} };
 
 static void fd_insert(const std::string& spec) {
     std::string err;
@@ -473,6 +485,28 @@ static void fd_save_d88(const std::string& path) {
     if (!im) { g_menu_note = "フロッピーは入っていません"; return; }
     std::string err;
     if (im->save_d88(path, &err)) { show_toast("D88 で保存しました"); menu_close(); }
+    else g_menu_note = "保存できませんでした: " + err;
+}
+// Greaseweazle のディスクを、磁気の記録のまま SCP で保存する（全トラックを読み直すので 1〜3 分かかる）。
+// 読む時間でディスクを確かめるソフトは、D88 では動かず、SCP なら動く
+static bool scp_progress(int done, int total, void*) {
+    char t[128]; snprintf(t, sizeof t, "PC98PLAYER ― SCP で保存しています… %d / %d トラック（Esc でやめる）", done, total);
+    SDL_SetWindowTitle(g_win, t);
+    SDL_Event e;
+    bool cancel = false;
+    while (SDL_PollEvent(&e)) {   // 入力は捨てる（ゲームへ送らない）
+        if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_ESCAPE) cancel = true;
+        else if (e.type == SDL_EVENT_QUIT) { SDL_PushEvent(&e); cancel = true; break; }   // 閉じるのは保存をやめてから
+    }
+    return !cancel;
+}
+static void fd_save_scp(const std::string& path) {
+    FloppyImage* im = fd_img();
+    if (!im || !im->src || !im->src->has_flux()) { g_menu_note = "Greaseweazle で読んでいるディスクだけ SCP で保存できます"; return; }
+    std::string err;
+    bool ok = im->save_scp(path, &err, scp_progress, nullptr);
+    update_title();
+    if (ok) { show_toast("SCP で保存しました"); menu_close(); }
     else g_menu_note = "保存できませんでした: " + err;
 }
 static void fd_insert_listed(int k) {
@@ -506,6 +540,7 @@ static void fd_menu_open() {
     g_fd_items.push_back({"読み直す（実機のディスクを入れ替えた）", FD_REREAD, im && im->src, ""});
     g_fd_items.push_back({std::string(im && im->wprot ? "＊" : "　") + "書き込み禁止（ライトプロテクト）", FD_WPROT, im != nullptr, ""});
     g_fd_items.push_back({"今のディスクを D88 で保存…", FD_SAVE, im != nullptr, ""});
+    g_fd_items.push_back({"今のディスクを SCP（磁気の記録のまま）で保存…", FD_SAVE_SCP, im && im->src && im->src->has_flux(), ""});
     g_fd_sel = 0;
 }
 static void fd_menu_decide(int i) {
@@ -524,6 +559,10 @@ static void fd_menu_decide(int i) {
     case FD_SAVE: {
         std::string def = hostfs::join(root, "DISK.D88");
         SDL_ShowSaveFileDialog(dialog_done, (void*)(intptr_t)DLG_SAVE_D88, g_win, k_d88_filter, 1, def.c_str());
+        break; }
+    case FD_SAVE_SCP: {
+        std::string def = hostfs::join(root, "DISK.SCP");
+        SDL_ShowSaveFileDialog(dialog_done, (void*)(intptr_t)DLG_SAVE_SCP, g_win, k_scp_filter, 1, def.c_str());
         break; }
     case FD_REREAD:
         floppy::media_changed();
@@ -785,6 +824,7 @@ static void on_event(SDL_Event& e, bool& running) {
         if (!path) return;
         if (e.user.code == DLG_INSERT) fd_insert(*path);
         else if (e.user.code == DLG_SAVE_D88) fd_save_d88(*path);
+        else if (e.user.code == DLG_SAVE_SCP) fd_save_scp(*path);
         else if (e.user.code == DLG_FD_FOLDER) fd_insert_folder(*path);
         delete path;
         return;
@@ -965,6 +1005,7 @@ static void write_template_ini(const std::string& path, const std::string& start
       << "; 起動時に全画面（Alt+Enter でも切替）" << nl << "FullScreen=0" << nl
       << "; 拡大時になめらかにする（0=ドットのまま）" << nl << "Smooth=0" << nl
       << "; 仮想 CPU の速さ（MHz 相当）" << nl << "CpuMHz=16" << nl
+      << "; 1 でパソコンが追いつかないときは CPU の速さを自動で下げる（音の途切れを防ぐ）。0 で常に CpuMHz= のまま" << nl << ";CpuThrottle=1" << nl
       << "; グラフィック GDC のクロック（DIP SW 2-8）。2.5 / 5。「GDC を 5MHz にしてください」と出るソフトは 5" << nl << "GDCClock=2.5" << nl
       << "; ゲームのフォルダを何ドライブに見せるか" << nl << "Drive=A" << nl
       << "; 音源ボード（86 / 26 / 0=なし）と割込み（3/10/12/13）" << nl << "SoundBoard=86" << nl << "SoundIRQ=12" << nl
@@ -1559,6 +1600,7 @@ int main(int argc, char** argv) {
             machine_mouse(g_p->m, dx, dy, g_mouse_btn);
         }
         pad::poll(g_p->m, (SDL_GetWindowFlags(g_win) & SDL_WINDOW_INPUT_FOCUS) != 0);   // ゲームパッド（窓が前にいるときだけ）
+        double emu_ms = 0;   // 1 フレームの実行にかかった時間（CPU の自動調整に使う）
         if (g_turbo) {
             // 早送り: 画面 1 枚ぶん（約 1/60 秒）の実時間いっぱいまでフレームを進め、最後の 1 枚だけ描く。
             // 音は合成しない（捨てるだけなので）
@@ -1573,8 +1615,30 @@ int main(int argc, char** argv) {
             if (g_audio && SDL_GetAudioStreamQueued(g_audio) > 0) audio_flush();
         } else {
             codeedit::tick();   // 書き込み続けるコード（%）
+            double e0 = now();
             g_p->run_frame(true);
             audio_push_frame();
+            emu_ms = (now() - e0) * 1000.0;
+        }
+        {   // CPU のクロックの自動調整（CpuThrottle=1）: PC が 1 フレームの間に CPU の命令を実行しきれないと、
+            // 音が尽きて途切れ、全体が遅くなる。そのときは実行するクロックを下げ、余裕が戻れば設定の値まで戻す。
+            // 時計（タイマー・垂直同期）は実時間のまま進むので、待ちの多いソフトはほぼ同じに動く
+            static double s_scale = 1.0, s_avg = 0;
+            uint32_t base = (uint32_t)(g_p->ps.cfg.cpu_mhz > 0 ? g_p->ps.cfg.cpu_mhz : 8) * 1000000u;
+            if (g_p->ps.cfg.cpu_throttle && !g_turbo) {
+                s_avg = s_avg * 0.9 + emu_ms * 0.1;
+                double budget = frame_sec * 1000.0 * 0.8;
+                if (s_avg > budget) s_scale *= 0.94;
+                else if (s_avg < budget * 0.6) s_scale *= 1.02;
+                s_scale = std::clamp(s_scale, 0.15, 1.0);
+                uint32_t hz = (uint32_t)(base * s_scale);
+                if (hz < 8000000u && base >= 8000000u) hz = 8000000u;   // 8MHz より下げない
+                g_p->m->cpu_hz = hz;
+            } else if (g_p->m->cpu_hz != base) { g_p->m->cpu_hz = base; s_scale = 1.0; }
+            // タイトルの CPU の速さ: 表示する値が変わったときだけ、0.5 秒に 1 回まで書き換える
+            static double s_title_t = 0;
+            int mhz = (int)((g_p->m->cpu_hz + 500000u) / 1000000u);
+            if (mhz != g_title_mhz && t - s_title_t > 0.5) { s_title_t = t; update_title(); }
         }
         next += frame_sec;
         if (t - next > 0.25) next = t;
