@@ -605,6 +605,45 @@ static uint8_t mpu_read_data(Machine* m) {
     return u.last;
 }
 
+// ---- A0000h〜FFFFFh の近道（memio.h） --------------------------------------------
+extern uint32_t g_watch_lo, g_watch_hi;
+uint8_t* g_up_rd[24];
+uint8_t* g_up_wr[24];
+uint8_t* pegc_fast_ptr(Machine* m, int w);
+bool ems_fast_block(uint32_t a);
+uint32_t g_ems_map_gen = 0;   // EMS の割り当てが変わるたびに増える（xmsems.cpp）
+void mem_fast_rebuild(Machine* m) {
+    // 決め手が前と同じなら作り直さない（I/O のたびに呼ばれるので）
+    static uint64_t s_key[3] = {~0ull, 0, 0};
+    uint64_t k0 = (uint64_t)m->pegc.on | ((uint64_t)m->pegc.mmio[0x100] << 8) | ((uint64_t)m->pegc.mmio[4] << 16) | ((uint64_t)m->pegc.mmio[5] << 24)
+                | ((uint64_t)m->pegc.mmio[6] << 32) | ((uint64_t)m->pegc.mmio[7] << 40) | ((uint64_t)m->grcg_mode << 48) | ((uint64_t)(m->egc_enabled ? 1 : 0) << 56)
+                | ((uint64_t)(m->draw_bank & 1) << 57) | ((uint64_t)(m->cfg.pc9821_ask ? 1 : 0) << 58) | ((uint64_t)(m->cfg.ems ? 1 : 0) << 59);
+    uint64_t k1 = ((uint64_t)g_ems_map_gen << 32) | (uint64_t)(uintptr_t)m->ram;
+    uint64_t k2 = ((uint64_t)g_watch_lo << 32) | g_watch_hi;
+    uint64_t k3 = (uint64_t)(uintptr_t)m->pegc_vram.data() ^ ((uint64_t)(uintptr_t)m << 1);   // ステートの読み込みで VRAM が作り直されたときも
+    static uint64_t s_k3 = 0;
+    if (k0 == s_key[0] && k1 == s_key[1] && k2 == s_key[2] && k3 == s_k3) return;
+    s_key[0] = k0; s_key[1] = k1; s_key[2] = k2; s_k3 = k3;
+    // 遅い道（mem_rb_slow / mem_wb_slow）と同じ順に、その 16KB がどこに行くかを決める
+    bool watch = g_watch_hi > g_watch_lo;
+    bool planes_plain = !m->pegc.on && !egc_on(m) && !(m->grcg_mode & 0x80);
+    for (int i = 0; i < 24; i++) {
+        uint32_t b = 0xA0000u + (uint32_t)i * 0x4000u;
+        uint8_t* r = nullptr; uint8_t* w = nullptr;
+        if (b >= 0xA8000 && b < 0xC0000) {
+            if (m->pegc.on) { if (b < 0xB8000) { uint8_t* p = pegc_fast_ptr(m, b >= 0xB0000); if (p) r = w = p + (b & 0x7FFF); } }
+            else if (planes_plain) { uint32_t off; int pl = plane_of(b, &off); r = w = &m->gvram[m->draw_bank][pl][off]; }
+        } else if (b >= 0xC0000 && b < 0xE0000) {
+            if (m->cfg.ems && ems_fast_block(b)) r = w = m->ram + b;
+        } else if (b >= 0xE0000 && b < 0xE8000) {
+            if (planes_plain) { uint32_t off; int pl = plane_of(b, &off); r = w = &m->gvram[m->draw_bank][pl][off]; }
+        } else if (b >= 0xE8000) {
+            if (!(m->cfg.pc9821_ask && b <= 0xF8E80 && 0xF8E80 < b + 0x4000)) r = m->ram + b;   // ROM（書き込みは遅い道で捨てる）
+        }
+        g_up_rd[i] = r; g_up_wr[i] = watch ? nullptr : w;
+    }
+}
+
 uint8_t mem_rb_slow(Machine* m, uint32_t a) {
     g_side_fx++;
     if (m->pegc.on) { uint8_t pv; if (pegc_mem_rb(m, a, &pv)) return pv; }   // PC-9821 の 256 色
@@ -634,7 +673,7 @@ uint32_t g_watch_lo = 0, g_watch_hi = 0;
 void watch_hit(Machine* m, uint32_t a, uint32_t v, int w) { if (a < 0xA0000) fprintf(stderr, "[wf f%llu] %05X <- %0*X @%04X:%04X\n", (unsigned long long)m->frame_count, a, w * 2, v, m->cpu.op_cs, m->cpu.op_ip); }
 void mem_wb_slow(Machine* m, uint32_t a, uint8_t v) {
     if (a >= g_watch_lo && a < g_watch_hi) plog("[w] %05X <- %02X grcg=%02X tile=%02X,%02X,%02X,%02X @%04X:%04X\n", a, v, m->grcg_mode, m->grcg_tile[0], m->grcg_tile[1], m->grcg_tile[2], m->grcg_tile[3], m->cpu.op_cs, m->cpu.op_ip);
-    if (m->pegc.on && pegc_mem_wb(m, a, v)) return;   // PC-9821 の 256 色
+    if (m->pegc.on && pegc_mem_wb(m, a, v)) { if (a >= 0xE0000) mem_fast_rebuild(m); return; }   // PC-9821 の 256 色
     if (a < 0xA4000) {
         if (a >= 0xA2000 && (a & 1)) return;
         m->tvram[a - 0xA0000] = v;
@@ -671,6 +710,7 @@ void mem_ww_slow(Machine* m, uint32_t a, uint16_t v) {
     uint32_t b = a & g_addr_mask;
     if (b + 1 >= g_watch_lo && b < g_watch_hi) plog("[w] %05X <- %04X (w) @%04X:%04X\n", b, v, m->cpu.op_cs, m->cpu.op_ip);
     if (pegc_window(m, b) && pegc_window(m, (a + 1) & g_addr_mask)) { g_side_fx++; pegc_write(m, b, v, 2); return; }
+    if (b >= 0xE0000 && b < 0xE8000 && m->pegc.on) { mem_wb(m, a, (uint8_t)v); mem_wb(m, a + 1, (uint8_t)(v >> 8)); return; }   // メモリマップドレジスタ（mem_wb_slow で作り直す）
     if (!m->pegc.on && egc_on(m)) {
         uint32_t off, off2;
         int p = plane_of(b, &off);
@@ -735,6 +775,7 @@ uint8_t io_in8(Machine* m, uint16_t port) {
     return v;
 }
 uint8_t io_in8_(Machine* m, uint16_t port) {
+    if ((port < 0x28 && (port & 1)) || (port >= 0x90 && port <= 0x94)) { uint8_t fv; if (fdc_io_in(m, port, &fv)) return fv; }   // DMA・1MB の FDC
     { uint8_t pv; if ((port == 0x9A0 || port == 0x9A8 || (port >= 0xA8 && port <= 0xAE)) && pegc_io_in(m, port, &pv)) return pv; }
     switch (port) {
     case 0x00: return pic_read(m, 0, 0);
@@ -799,11 +840,17 @@ static bool unknown_io_log(Machine* m, uint16_t port) {
     per_port[port]++; m->unknown_io++;
     return true;
 }
+static void io_out8_(Machine* m, uint16_t port, uint8_t v);
 void io_out8(Machine* m, uint16_t port, uint8_t v) {
+    io_out8_(m, port, v);
+    mem_fast_rebuild(m);   // VRAM のバンク・描き方・EMS などが変わったかもしれない
+}
+static void io_out8_(Machine* m, uint16_t port, uint8_t v) {
     g_side_fx++;
     if (g_dbg_on) dbg_note_io(m, port, v, true, false);
     if (port >= g_trace_port_lo && port <= g_trace_port_hi && s_port_log++ < 3000) plog("[out] %04X <- %02X @%04X:%04X\n", port, v, m->cpu.op_cs, m->cpu.op_ip);
     if ((port == 0x6A || port == 0x9A0 || port == 0x9A8 || (port >= 0xA8 && port <= 0xAE)) && pegc_io_out(m, port, v)) return;   // PC-9821 の 256 色
+    if (((port < 0x28 && (port & 1)) || (port >= 0x90 && port <= 0x94)) && fdc_io_out(m, port, v)) return;   // DMA・1MB の FDC
     switch (port) {
     case 0x00: pic_write(m, 0, 0, v); return;
     case 0x02: pic_write(m, 0, 1, v); return;
@@ -911,7 +958,12 @@ void io_out16(Machine* m, uint16_t port, uint16_t v) {
 }
 
 // ---- HLE 振り分け ------------------------------------------------------------
+static void hle_trap_(Machine* m, uint8_t n);
 void hle_trap(Machine* m, uint8_t n) {
+    hle_trap_(m, n);
+    mem_fast_rebuild(m);   // BIOS・EMS の呼び出しで、メモリの割り当てや画面の設定が変わったかもしれない
+}
+static void hle_trap_(Machine* m, uint8_t n) {
     g_side_fx++;
     if (m->cfg.boot_fd && bios_rom_trap(m)) return;
     switch (n) {
@@ -1035,6 +1087,7 @@ static void advance(Machine* m, uint32_t t) {
         m->fd_irq_wait[u] = (int32_t)(MASTER_CLOCK / 30);   // 抜いてから入れるまで少し間をあける
     }
 
+    fdc_advance(m, t);
     // 垂直同期
     uint32_t before = m->frame_pos;
     m->frame_pos += t;
@@ -1046,7 +1099,10 @@ static void advance(Machine* m, uint32_t t) {
 }
 
 void machine_run_frame(Machine* m) {
-    const int SLICE = 96;
+    // 1 回に実行するクロック数。時間にして約 4µs（8MHz で 32 クロック）を目安にし、少なくとも 96 クロック。
+    // 速い CPU で細かく区切りすぎると、区切りごとの処理（周辺の時間を進める）のほうが重くなる
+    int slice = (int)(m->cpu_hz / 250000u);
+    if (slice < 96) slice = 96;
     while (m->frame_pos < FRAME_TICKS) {
         if (g_poll_until) {   // GDC の状態の読み待ち（上）: CPU は止めたまま時間だけ進める
             if (m->ticks >= g_poll_until || irq_waiting(m)) { g_poll_until = 0; s_pw.n = 0; }
@@ -1058,7 +1114,8 @@ void machine_run_frame(Machine* m) {
                 continue;
             }
         }
-        int used = cpu_run(&m->cpu, SLICE);
+        mem_fast_rebuild(m);
+        int used = cpu_run(&m->cpu, slice);
         m->cyc_acc += (uint64_t)used * MASTER_CLOCK;
         uint32_t t = (uint32_t)(m->cyc_acc / m->cpu_hz);
         m->cyc_acc %= m->cpu_hz;
@@ -1072,6 +1129,8 @@ void machine_run_frame(Machine* m) {
 Machine* machine_create(const Config& cfg) {
     Machine* m = new Machine();
     g_m = m;
+    memset(g_up_rd, 0, sizeof g_up_rd); memset(g_up_wr, 0, sizeof g_up_wr);   // 前の機械を指したままにしない
+    g_ems_map_gen++;
     m->cfg = cfg;
     {
         uint32_t ext = cfg.ext_kb > 0 ? (uint32_t)(cfg.ext_kb > 14336 ? 14336 : cfg.ext_kb) * 1024u : 0;   // 15MB まで（0401h の上限）
@@ -1085,6 +1144,7 @@ Machine* machine_create(const Config& cfg) {
     memset(m->gvram, 0, sizeof(m->gvram));
     pegc_clear(m);
     avsfm_reset(m);
+    fdc_reset(m);
     { extern int g_idle_skip; g_idle_skip = (cfg.idle_skip && !getenv("PC98PLAYER_NOIDLE")) ? 1 : 0; }
     m->cpu_hz = (uint32_t)cfg.cpu_mhz * 1000000u;
     if (m->cpu_hz < 1000000u) m->cpu_hz = 8000000u;
@@ -1128,6 +1188,7 @@ Machine* machine_create(const Config& cfg) {
 void machine_destroy(Machine* m) {
     if (!m) return;
     free(m->ram);
+    memset(g_up_rd, 0, sizeof g_up_rd); memset(g_up_wr, 0, sizeof g_up_wr);
     delete m;
     if (g_m == m) g_m = nullptr;
 }

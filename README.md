@@ -68,7 +68,7 @@ EXE を 1 か所に置いたまま使い回す場合は、ショートカット�
 | 層 | 中身 |
 |---|---|
 | CPU | i386 リアルモードのインタプリタ（8086/V30/286 上位互換、32bit レジスタ・386 命令込み） |
-| ハードウェア | GDC（テキスト/グラフィック、200 ライン表示）、GRCG、**EGC**、16 色アナログパレット、8259、8253、キーボード、バスマウス、漢字 ROM ポート・外字、YM2608(OPNA)、**86 ボードの PCM**、**MPU-PC98II（MIDI）**・RS-232C の MIDI 出力、ROM のグラフィック LIO（INT A0h-AFh。画面設定・色・点・線・箱・塗りつぶし・PAINT（単色・タイル）・GGET/GPUT1。円・漢字の GPUT2 は未対応）、**サウンド BIOS**（INT D2h。`SoundBIOS=1`。音色は自前）、ブザーの音程の変化（BEEP 演奏）、**386 の保護モード**（GDT/LDT/IDT・32 ビットのコード。特権の検査・ページングは省略）と拡張メモリ（`ExtMemMB=`、INT 1Fh のブロック転送）、**仮想フロッピー**（D88/ベタ/FDI/NFD/SCP/HFE、実機の USB フロッピー・Greaseweazle。INT 1Bh の ID 指定読み書き・READ ID、DOS の FAT12/16 ドライブ、INT 25h/26h）、**CD-ROM**（ISO / CUE / BIN イメージかフォルダを MSCDEX 付きのドライブとして。読み出しだけ）と **CD-DA**（CUE の音楽トラック、または WAV / MP3 / FLAC のフォルダ） |
+| ハードウェア | GDC（テキスト/グラフィック、200 ライン表示）、GRCG、**EGC**、16 色アナログパレット、8259、8253、キーボード、バスマウス、漢字 ROM ポート・外字、YM2608(OPNA)、**86 ボードの PCM**、**MPU-PC98II（MIDI）**・RS-232C の MIDI 出力、ROM のグラフィック LIO（INT A0h-AFh。画面設定・色・点・線・箱・塗りつぶし・PAINT（単色・タイル）・GGET/GPUT1。円・漢字の GPUT2 は未対応）、**サウンド BIOS**（INT D2h。`SoundBIOS=1`。音色は自前）、ブザーの音程の変化（BEEP 演奏）、**386 の保護モード**（GDT/LDT/IDT・32 ビットのコード。特権の検査・ページングは省略）と拡張メモリ（`ExtMemMB=`、INT 1Fh のブロック転送）、**仮想フロッピー**（D88/ベタ/FDI/NFD/SCP/HFE、実機の USB フロッピー・Greaseweazle。INT 1Bh の ID 指定読み書き・READ ID、1MB の FDC（µPD765）と DMA の直接操作、DOS の FAT12/16 ドライブ、INT 25h/26h）、**CD-ROM**（ISO / CUE / BIN イメージかフォルダを MSCDEX 付きのドライブとして。読み出しだけ）と **CD-DA**（CUE の音楽トラック、または WAV / MP3 / FLAC のフォルダ） |
 | BIOS | HLE: INT 18h（キー/CRT/グラフィック）、INT 1Ch（時計/インターバルタイマ）、IRQ1、INT 33h（マウスドライバ: カーソル表示・イベントハンドラ）、INT DCh |
 | DOS | HLE: INT 21h をゲームのフォルダへ直結（ファイル・FCB・MCB メモリ管理・EXEC・常駐終了・FindFirst・SFT/List of Lists など） |
 | 拡張メモリ | HLE: **HIMEM.SYS（XMS 3.0）** と **EMM386（LIM EMS 4.0、ページフレーム D000h）** |
@@ -90,6 +90,7 @@ Scale=2              ; 表示倍率（1 で 640x400）
 FullScreen=0         ; 起動時に全画面
 Smooth=0             ; 拡大をなめらかに
 CpuMHz=16            ; 仮想 CPU の速さ
+CpuThrottle=1        ; 1: パソコンが追いつかないときは CPU の速さを自動で下げる（音の途切れを防ぐ）
 Drive=A              ; ゲームのフォルダを何ドライブに見せるか
 SoundBoard=86        ; 86 / 26 / 0（なし）
 SoundBIOS=0          ; 1 でサウンド BIOS（CC00h・INT D2h）を載せる（MIMPI の FM 演奏など。音色は自前）
@@ -151,7 +152,7 @@ JoyRapid=4           ; 連射の速さ（何フレームごとに切り替える
 
 INI を書き換えたら、**F11 → R（プログラム再起動）** で INI を読み直して起動し直します（PC98PLAYER を閉じずに設定を試せます。FloppyDisk= / FloppyImage= は変えたときだけ入れ替え）。
 
-INI は Shift_JIS でも UTF-8 でも構いません。`samples\` に例があります（ランス３の 2 ドライブ構成は `rance3.INI`、Greaseweazle で吸い出したキーディスクを使うスレイヤーズ！は `slayers.INI`、CD-ROM 版の ISO イメージで遊ぶ例は `ed4_98cdrom.ini`、CUE シートで CD-DA も鳴らす例は `konpeki2pf_install.ini`（インストール用）と `konpeki2pf.ini`（実行用））。
+INI は Shift_JIS でも UTF-8 でも構いません。`samples\` に例があります（ランス３の 2 ドライブ構成は `rance3.INI`、Greaseweazle で吸い出したキーディスクを使うスレイヤーズ！は `slayers.INI`、CD-ROM 版の ISO イメージで遊ぶ例は `ed4_98cdrom.ini`、CUE シートで CD-DA も鳴らす例は `konpeki2pf_install.ini`（インストール用）と `konpeki2pf.ini`（実行用）、PC-9821 の 256 色で CD-ROM 版をインストールして遊ぶ例は `puyo2_install.ini` と `puyo2.ini`）。
 
 ## 操作
 
